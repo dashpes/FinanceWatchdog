@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-import requests
+import httpx
 import yfinance as yf
 from bs4 import BeautifulSoup
 from loguru import logger
@@ -55,7 +55,7 @@ class UniverseCollector(BaseCollector):
         self._collect_sp500 = collect_sp500
         self._collect_nasdaq100 = collect_nasdaq100
 
-    def _fetch_url(self, url: str) -> str:
+    async def _fetch_url(self, url: str) -> str:
         """
         Fetch content from a URL with proper headers.
 
@@ -66,7 +66,7 @@ class UniverseCollector(BaseCollector):
             HTML content as string
 
         Raises:
-            requests.RequestException: If request fails
+            httpx.HTTPStatusError: If request fails
         """
         headers = {
             "User-Agent": (
@@ -75,9 +75,10 @@ class UniverseCollector(BaseCollector):
                 "Chrome/91.0.4472.124 Safari/537.36"
             )
         }
-        response = requests.get(url, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.text
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.text
 
     async def collect_sp500(self) -> list[str]:
         """
@@ -90,8 +91,8 @@ class UniverseCollector(BaseCollector):
             List of ticker symbols
         """
 
-        def _fetch_sp500() -> list[str]:
-            html = self._fetch_url(self.SP500_URL)
+        async def _fetch_sp500() -> list[str]:
+            html = await self._fetch_url(self.SP500_URL)
             soup = BeautifulSoup(html, "lxml")
 
             # Find the constituents table (first table with id="constituents")
@@ -134,8 +135,8 @@ class UniverseCollector(BaseCollector):
             List of ticker symbols
         """
 
-        def _fetch_nasdaq100() -> list[str]:
-            html = self._fetch_url(self.NASDAQ100_URL)
+        async def _fetch_nasdaq100() -> list[str]:
+            html = await self._fetch_url(self.NASDAQ100_URL)
             soup = BeautifulSoup(html, "lxml")
 
             # Find the constituents table
@@ -254,8 +255,8 @@ class UniverseCollector(BaseCollector):
                         holdings_data = etf.get_holdings()
                         if holdings_data is not None and not holdings_data.empty:
                             holdings = holdings_data.index.tolist()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Method 1 (get_holdings) failed for {etf_ticker}: {e}")
 
                 # Method 2: Try funds_data
                 if not holdings:
@@ -265,8 +266,8 @@ class UniverseCollector(BaseCollector):
                             top_holdings = funds_data.top_holdings
                             if top_holdings is not None:
                                 holdings = list(top_holdings.index)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Method 2 (funds_data) failed for {etf_ticker}: {e}")
 
                 # Method 3: Try institutional_holders as last resort
                 if not holdings:
@@ -276,8 +277,8 @@ class UniverseCollector(BaseCollector):
                             if "Holder" in inst_holders.columns:
                                 # This is typically institution names, not stock tickers
                                 pass
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Method 3 (institutional_holders) failed for {etf_ticker}: {e}")
 
                 # Clean tickers
                 cleaned_holdings = []
