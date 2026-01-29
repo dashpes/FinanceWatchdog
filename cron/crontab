@@ -1,0 +1,12 @@
+# Investment Monitor Schedules
+# Timezone: America/Los_Angeles (set via TZ environment variable in docker-compose)
+
+# Regular data collection and immediate alerts
+# Run every 4 hours during market days (Monday-Friday)
+0 6,10,14,18 * * 1-5 /app/scripts/run_regular.sh >> /app/logs/cron.log 2>&1
+
+# Daily digest at 7am every day
+0 7 * * * /app/scripts/run_digest.sh >> /app/logs/cron.log 2>&1
+
+# Weekly synthesis on Sunday at 6pm
+0 18 * * 0 /app/scripts/run_weekly.sh >> /app/logs/cron.log 2>&1
