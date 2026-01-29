@@ -1,8 +1,15 @@
-"""Tests for alert priority classification."""
+"""Tests for alert priority classification and deduplication."""
+
+import tempfile
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
 from investment_monitor.alerts import (
+    DEFAULT_DEDUP_WINDOW,
+    DEDUP_WINDOWS,
+    AlertDeduplicator,
     HIGH_PRIORITY_EXECUTIVES,
     HIGH_PRIORITY_KEYWORDS,
     LOW_PRIORITY_KEYWORDS,
@@ -12,6 +19,11 @@ from investment_monitor.alerts import (
 )
 from investment_monitor.models import AlertsConfig
 from investment_monitor.notifications import AlertMessage, Priority
+from investment_monitor.storage import (
+    AlertSent,
+    get_session,
+    init_db,
+)
 
 
 @pytest.fixture
@@ -424,3 +436,470 @@ class TestEdgeCases:
             alert_type="price",
         )
         assert classify_priority(alert, default_config) == Priority.HIGH
+
+
+# ============================================================================
+# Alert Deduplication Tests
+# ============================================================================
+
+
+@pytest.fixture
+def db_session():
+    """Create a temporary database for testing deduplication."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        init_db(db_path)
+        with get_session() as session:
+            yield session
+
+
+@pytest.fixture
+def deduplicator(db_session):
+    """Create an AlertDeduplicator with a test database."""
+    return AlertDeduplicator(db_session)
+
+
+@pytest.fixture
+def sample_alert():
+    """Create a sample alert for testing."""
+    return AlertMessage(
+        title="AAPL dropped 5%",
+        body="Apple stock dropped 5% today.",
+        ticker="AAPL",
+        alert_type="price",
+        priority=Priority.MEDIUM,
+    )
+
+
+class TestDedupWindowsConfig:
+    """Tests for deduplication window configuration."""
+
+    def test_price_alerts_have_24_hour_window(self):
+        """Test price-related alerts have 24-hour dedup window."""
+        assert DEDUP_WINDOWS["price_drop"] == timedelta(hours=24)
+        assert DEDUP_WINDOWS["price_rise"] == timedelta(hours=24)
+        assert DEDUP_WINDOWS["price"] == timedelta(hours=24)
+
+    def test_volume_alerts_have_12_hour_window(self):
+        """Test volume alerts have 12-hour dedup window."""
+        assert DEDUP_WINDOWS["volume_spike"] == timedelta(hours=12)
+        assert DEDUP_WINDOWS["volume"] == timedelta(hours=12)
+
+    def test_insider_alerts_have_7_day_window(self):
+        """Test insider alerts have 7-day dedup window."""
+        assert DEDUP_WINDOWS["insider_transaction"] == timedelta(days=7)
+        assert DEDUP_WINDOWS["insider"] == timedelta(days=7)
+
+    def test_earnings_alerts_have_3_day_window(self):
+        """Test earnings alerts have 3-day dedup window."""
+        assert DEDUP_WINDOWS["earnings_upcoming"] == timedelta(days=3)
+        assert DEDUP_WINDOWS["earnings"] == timedelta(days=3)
+
+    def test_news_alerts_have_1_day_window(self):
+        """Test news alerts have 1-day dedup window."""
+        assert DEDUP_WINDOWS["news_keyword"] == timedelta(days=1)
+        assert DEDUP_WINDOWS["news"] == timedelta(days=1)
+
+    def test_other_alert_types(self):
+        """Test other alert types have appropriate windows."""
+        assert DEDUP_WINDOWS["dividend"] == timedelta(days=7)
+        assert DEDUP_WINDOWS["filing"] == timedelta(days=7)
+        assert DEDUP_WINDOWS["analyst"] == timedelta(days=1)
+        assert DEDUP_WINDOWS["system"] == timedelta(hours=1)
+
+    def test_default_dedup_window(self):
+        """Test default dedup window for unknown types."""
+        assert DEFAULT_DEDUP_WINDOW == timedelta(hours=24)
+
+
+class TestGenerateDedupKey:
+    """Tests for dedup key generation."""
+
+    def test_generates_key_with_ticker(self, deduplicator):
+        """Test key includes alert type and ticker."""
+        alert = AlertMessage(
+            title="AAPL dropped 5%",
+            body="Apple stock dropped.",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        key = deduplicator.generate_dedup_key(alert)
+
+        assert "price" in key
+        assert "AAPL" in key
+        assert key.count(":") == 2  # Format: type:ticker:hash
+
+    def test_generates_key_without_ticker(self, deduplicator):
+        """Test key works without ticker."""
+        alert = AlertMessage(
+            title="System maintenance",
+            body="Scheduled downtime.",
+            alert_type="system",
+        )
+        key = deduplicator.generate_dedup_key(alert)
+
+        assert "system" in key
+        assert "::" in key  # Empty ticker section
+
+    def test_different_titles_generate_different_keys(self, deduplicator):
+        """Test that different titles produce different keys."""
+        alert1 = AlertMessage(
+            title="AAPL dropped 5%",
+            body="Body text",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        alert2 = AlertMessage(
+            title="AAPL dropped 3%",
+            body="Body text",
+            ticker="AAPL",
+            alert_type="price",
+        )
+
+        key1 = deduplicator.generate_dedup_key(alert1)
+        key2 = deduplicator.generate_dedup_key(alert2)
+
+        assert key1 != key2
+
+    def test_same_alert_generates_same_key(self, deduplicator, sample_alert):
+        """Test that the same alert always generates the same key."""
+        key1 = deduplicator.generate_dedup_key(sample_alert)
+        key2 = deduplicator.generate_dedup_key(sample_alert)
+
+        assert key1 == key2
+
+    def test_key_format(self, deduplicator):
+        """Test key follows expected format."""
+        alert = AlertMessage(
+            title="Test alert",
+            body="Test body",
+            ticker="TEST",
+            alert_type="price",
+        )
+        key = deduplicator.generate_dedup_key(alert)
+
+        parts = key.split(":")
+        assert len(parts) == 3
+        assert parts[0] == "price"
+        assert parts[1] == "TEST"
+        assert len(parts[2]) == 8  # SHA256 hash truncated to 8 chars
+
+
+class TestGetDedupWindow:
+    """Tests for getting dedup windows by alert type."""
+
+    def test_known_alert_types(self, deduplicator):
+        """Test known alert types return correct windows."""
+        assert deduplicator.get_dedup_window("price") == timedelta(hours=24)
+        assert deduplicator.get_dedup_window("volume") == timedelta(hours=12)
+        assert deduplicator.get_dedup_window("insider") == timedelta(days=7)
+
+    def test_unknown_alert_type_returns_default(self, deduplicator):
+        """Test unknown alert types return default window."""
+        window = deduplicator.get_dedup_window("unknown_type")
+        assert window == DEFAULT_DEDUP_WINDOW
+
+
+class TestIsDuplicate:
+    """Tests for duplicate detection."""
+
+    def test_new_alert_is_not_duplicate(self, deduplicator, sample_alert):
+        """Test that a new alert is not considered a duplicate."""
+        assert deduplicator.is_duplicate(sample_alert) is False
+
+    def test_recently_sent_alert_is_duplicate(self, deduplicator, db_session, sample_alert):
+        """Test that a recently sent alert is considered a duplicate."""
+        # Mark alert as sent
+        deduplicator.mark_sent(sample_alert, "console")
+        db_session.commit()
+
+        # Should now be detected as duplicate
+        assert deduplicator.is_duplicate(sample_alert) is True
+
+    def test_different_alert_not_duplicate(self, deduplicator, db_session):
+        """Test that different alerts are not duplicates of each other."""
+        alert1 = AlertMessage(
+            title="AAPL dropped 5%",
+            body="Apple stock dropped.",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        alert2 = AlertMessage(
+            title="MSFT rose 3%",
+            body="Microsoft stock rose.",
+            ticker="MSFT",
+            alert_type="price",
+        )
+
+        deduplicator.mark_sent(alert1, "console")
+        db_session.commit()
+
+        assert deduplicator.is_duplicate(alert2) is False
+
+    def test_same_ticker_different_type_not_duplicate(self, deduplicator, db_session):
+        """Test that same ticker with different alert type is not a duplicate."""
+        alert1 = AlertMessage(
+            title="AAPL price alert",
+            body="Price changed.",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        alert2 = AlertMessage(
+            title="AAPL volume alert",
+            body="Volume spiked.",
+            ticker="AAPL",
+            alert_type="volume",
+        )
+
+        deduplicator.mark_sent(alert1, "console")
+        db_session.commit()
+
+        assert deduplicator.is_duplicate(alert2) is False
+
+
+class TestMarkSent:
+    """Tests for marking alerts as sent."""
+
+    def test_mark_sent_returns_id(self, deduplicator, sample_alert):
+        """Test that mark_sent returns the alert record ID."""
+        alert_id = deduplicator.mark_sent(sample_alert, "console")
+
+        assert isinstance(alert_id, int)
+        assert alert_id > 0
+
+    def test_mark_sent_creates_record(self, deduplicator, db_session, sample_alert):
+        """Test that mark_sent creates a database record."""
+        deduplicator.mark_sent(sample_alert, "console")
+        db_session.commit()
+
+        # Query directly to verify
+        record = db_session.query(AlertSent).first()
+        assert record is not None
+        assert record.alert_type == "price"
+        assert record.ticker == "AAPL"
+        assert record.channel == "console"
+        assert record.dedup_key is not None
+
+    def test_mark_sent_stores_message_body(self, deduplicator, db_session, sample_alert):
+        """Test that mark_sent stores the message body."""
+        deduplicator.mark_sent(sample_alert, "console")
+        db_session.commit()
+
+        record = db_session.query(AlertSent).first()
+        assert record.message == sample_alert.body
+
+    def test_mark_sent_stores_priority(self, deduplicator, db_session, sample_alert):
+        """Test that mark_sent stores the priority."""
+        deduplicator.mark_sent(sample_alert, "console")
+        db_session.commit()
+
+        record = db_session.query(AlertSent).first()
+        assert record.priority == sample_alert.priority.value
+
+    def test_mark_sent_stores_channel(self, deduplicator, db_session, sample_alert):
+        """Test that mark_sent stores different channels correctly."""
+        deduplicator.mark_sent(sample_alert, "slack")
+        db_session.commit()
+
+        record = db_session.query(AlertSent).first()
+        assert record.channel == "slack"
+
+    def test_mark_sent_without_ticker(self, deduplicator, db_session):
+        """Test marking sent for alert without ticker."""
+        alert = AlertMessage(
+            title="System alert",
+            body="System message.",
+            alert_type="system",
+        )
+        deduplicator.mark_sent(alert, "console")
+        db_session.commit()
+
+        record = db_session.query(AlertSent).first()
+        assert record.ticker == ""
+
+
+class TestFilterDuplicates:
+    """Tests for filtering duplicate alerts."""
+
+    def test_filter_empty_list(self, deduplicator):
+        """Test filtering an empty list returns empty list."""
+        result = deduplicator.filter_duplicates([])
+        assert result == []
+
+    def test_filter_all_unique(self, deduplicator):
+        """Test filtering all unique alerts returns all."""
+        alerts = [
+            AlertMessage(
+                title="AAPL alert",
+                body="Body",
+                ticker="AAPL",
+                alert_type="price",
+            ),
+            AlertMessage(
+                title="MSFT alert",
+                body="Body",
+                ticker="MSFT",
+                alert_type="price",
+            ),
+            AlertMessage(
+                title="GOOGL alert",
+                body="Body",
+                ticker="GOOGL",
+                alert_type="price",
+            ),
+        ]
+
+        result = deduplicator.filter_duplicates(alerts)
+        assert len(result) == 3
+
+    def test_filter_removes_duplicates_in_batch(self, deduplicator):
+        """Test that duplicate alerts in the same batch are filtered."""
+        alert = AlertMessage(
+            title="Same alert",
+            body="Body",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        # Same alert appears multiple times
+        alerts = [alert, alert, alert]
+
+        result = deduplicator.filter_duplicates(alerts)
+        assert len(result) == 1
+
+    def test_filter_removes_previously_sent(self, deduplicator, db_session):
+        """Test that previously sent alerts are filtered."""
+        alert1 = AlertMessage(
+            title="Old alert",
+            body="Body",
+            ticker="AAPL",
+            alert_type="price",
+        )
+        alert2 = AlertMessage(
+            title="New alert",
+            body="Body",
+            ticker="MSFT",
+            alert_type="price",
+        )
+
+        # Mark first alert as sent
+        deduplicator.mark_sent(alert1, "console")
+        db_session.commit()
+
+        # Filter both alerts
+        result = deduplicator.filter_duplicates([alert1, alert2])
+
+        assert len(result) == 1
+        assert result[0].ticker == "MSFT"
+
+    def test_filter_preserves_order(self, deduplicator):
+        """Test that filtering preserves order of unique alerts."""
+        alerts = [
+            AlertMessage(title="First", body="B", ticker="A", alert_type="price"),
+            AlertMessage(title="Second", body="B", ticker="B", alert_type="price"),
+            AlertMessage(title="Third", body="B", ticker="C", alert_type="price"),
+        ]
+
+        result = deduplicator.filter_duplicates(alerts)
+
+        assert [a.title for a in result] == ["First", "Second", "Third"]
+
+    def test_filter_with_mixed_duplicates(self, deduplicator, db_session):
+        """Test filtering with mix of old and new duplicates."""
+        old_alert = AlertMessage(
+            title="Old",
+            body="Body",
+            ticker="OLD",
+            alert_type="price",
+        )
+        new_alert = AlertMessage(
+            title="New",
+            body="Body",
+            ticker="NEW",
+            alert_type="price",
+        )
+        same_new = AlertMessage(
+            title="New",  # Same title as new_alert
+            body="Body",
+            ticker="NEW",
+            alert_type="price",
+        )
+
+        # Mark old alert as sent
+        deduplicator.mark_sent(old_alert, "console")
+        db_session.commit()
+
+        # Filter: old (sent), new, same_new (batch duplicate)
+        result = deduplicator.filter_duplicates([old_alert, new_alert, same_new])
+
+        assert len(result) == 1
+        assert result[0].title == "New"
+
+
+class TestDeduplicatorIntegration:
+    """Integration tests for the complete deduplication flow."""
+
+    def test_full_workflow(self, deduplicator, db_session):
+        """Test complete deduplication workflow."""
+        # Generate alerts
+        alerts = [
+            AlertMessage(
+                title="AAPL dropped 5%",
+                body="Apple dropped.",
+                ticker="AAPL",
+                alert_type="price",
+            ),
+            AlertMessage(
+                title="MSFT rose 3%",
+                body="Microsoft rose.",
+                ticker="MSFT",
+                alert_type="price",
+            ),
+        ]
+
+        # Filter - all should pass
+        filtered = deduplicator.filter_duplicates(alerts)
+        assert len(filtered) == 2
+
+        # Mark as sent
+        for alert in filtered:
+            deduplicator.mark_sent(alert, "console")
+        db_session.commit()
+
+        # Try to filter again - should all be blocked
+        filtered_again = deduplicator.filter_duplicates(alerts)
+        assert len(filtered_again) == 0
+
+        # New alert should still pass
+        new_alert = AlertMessage(
+            title="GOOGL volume spike",
+            body="Google volume.",
+            ticker="GOOGL",
+            alert_type="volume",
+        )
+        filtered_new = deduplicator.filter_duplicates([new_alert] + alerts)
+        assert len(filtered_new) == 1
+        assert filtered_new[0].ticker == "GOOGL"
+
+    def test_multiple_channels(self, deduplicator, db_session):
+        """Test that alerts sent to different channels are tracked."""
+        alert = AlertMessage(
+            title="Multi-channel alert",
+            body="Body",
+            ticker="AAPL",
+            alert_type="price",
+        )
+
+        # Send to multiple channels
+        deduplicator.mark_sent(alert, "console")
+        deduplicator.mark_sent(alert, "slack")
+        deduplicator.mark_sent(alert, "email")
+        db_session.commit()
+
+        # Should still be considered duplicate
+        assert deduplicator.is_duplicate(alert) is True
+
+        # All three records should exist
+        records = db_session.query(AlertSent).all()
+        assert len(records) == 3
+        channels = {r.channel for r in records}
+        assert channels == {"console", "slack", "email"}
