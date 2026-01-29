@@ -1,5 +1,6 @@
 """Fundamentals collector for fetching financial metrics via yfinance."""
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -99,8 +100,6 @@ class FundamentalsCollector(BaseCollector):
             return None
 
         # Handle NaN and Inf
-        import math
-
         if math.isnan(value) or math.isinf(value):
             return None
 
