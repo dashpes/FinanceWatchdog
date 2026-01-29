@@ -859,7 +859,7 @@ class TestNewsCollectorCollect:
         mock_parse.return_value = MockFeed(entries=[mock_entry])
         mock_exists.return_value = False
 
-        result = await news_collector.collect(["AAPL"])
+        await news_collector.collect(["AAPL"])
 
         # Should not save entries without URLs
         mock_exists.assert_not_called()
