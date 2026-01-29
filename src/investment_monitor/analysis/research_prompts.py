@@ -109,6 +109,8 @@ Respond with ONLY valid JSON in this exact format:
 MOMENTUM_SCORE_PROMPT = """You are a technical analyst. Evaluate the price momentum for this stock and provide a score.
 
 Company: {company_name} ({ticker})
+Sector: {sector}
+Industry: {industry}
 
 Price Performance:
 - 1-Month Change: {price_change_1m}%
@@ -138,6 +140,8 @@ Respond with ONLY valid JSON in this exact format:
 SENTIMENT_SCORE_PROMPT = """You are a market sentiment analyst. Evaluate the overall market sentiment for this stock and provide a score.
 
 Company: {company_name} ({ticker})
+Sector: {sector}
+Industry: {industry}
 
 Sentiment Indicators:
 - Recent News Summary: {recent_news_summary}
@@ -214,6 +218,8 @@ PROMPT_PLACEHOLDERS = {
         "rsi",
         "vs_52w_high",
         "vs_52w_low",
+        "sector",
+        "industry",
     ],
     "sentiment": [
         "ticker",
@@ -222,5 +228,7 @@ PROMPT_PLACEHOLDERS = {
         "insider_activity",
         "analyst_rating",
         "short_interest",
+        "sector",
+        "industry",
     ],
 }

@@ -368,11 +368,14 @@ class TestPromptFormatting:
             rsi=62,
             vs_52w_high=-12.5,
             vs_52w_low=85.3,
+            sector="Consumer Cyclical",
+            industry="Auto Manufacturers",
         )
         assert "TSLA" in formatted
         assert "Tesla Inc." in formatted
         assert "15.2" in formatted
         assert "-12.5" in formatted
+        assert "Auto Manufacturers" in formatted
 
     def test_sentiment_prompt_formats_correctly(self):
         """SENTIMENT_SCORE_PROMPT should format with all placeholders."""
@@ -383,11 +386,14 @@ class TestPromptFormatting:
             insider_activity="CEO sold 10,000 shares for tax purposes",
             analyst_rating="Buy (4.2/5)",
             short_interest=2.5,
+            sector="Communication Services",
+            industry="Internet Content & Information",
         )
         assert "META" in formatted
         assert "Meta Platforms Inc." in formatted
         assert "Positive earnings report" in formatted
         assert "Buy (4.2/5)" in formatted
+        assert "Internet Content & Information" in formatted
 
 
 class TestScoringGuidelines:
