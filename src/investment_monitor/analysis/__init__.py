@@ -28,6 +28,7 @@ from .claude_api import (
     WEEKLY_SYNTHESIS_PROMPT,
 )
 from .local_llm import LocalLLM
+from .news_processor import NewsProcessor
 from .prompts import (
     RELEVANCE_PROMPT,
     SENTIMENT_PROMPT,
@@ -37,6 +38,8 @@ from .prompts import (
 __all__ = [
     # Local LLM
     "LocalLLM",
+    # News Processing
+    "NewsProcessor",
     # Claude API
     "ClaudeAnalyzer",
     "SynthesisResult",
