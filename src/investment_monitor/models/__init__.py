@@ -10,9 +10,17 @@ from .alerts import (
     VolumeAlertSettings,
 )
 from .portfolio import Holding, Portfolio, WatchlistItem
+from .research import (
+    ClaudeBudgetConfig,
+    ResearchConfig,
+    ResearchThresholds,
+    ScoringWeights,
+    UniverseConfig,
+)
 
 __all__ = [
     "AlertsConfig",
+    "ClaudeBudgetConfig",
     "EarningsAlertSettings",
     "ETFAlertSettings",
     "Holding",
@@ -20,6 +28,10 @@ __all__ = [
     "NewsAlertSettings",
     "Portfolio",
     "PriceAlertSettings",
+    "ResearchConfig",
+    "ResearchThresholds",
+    "ScoringWeights",
+    "UniverseConfig",
     "VolumeAlertSettings",
     "WatchlistItem",
 ]
