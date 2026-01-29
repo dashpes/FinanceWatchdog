@@ -89,7 +89,7 @@ class CandidateScore(Base):
     __tablename__ = "candidate_scores"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
     value_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     growth_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -116,7 +116,7 @@ class ResearchReport(Base):
     __tablename__ = "research_reports"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     bull_case: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     bear_case: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -139,7 +139,7 @@ class PerformanceTracker(Base):
     __tablename__ = "performance_trackers"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
     entry_date: Mapped[date] = mapped_column(Date, nullable=False)
     entry_price: Mapped[float] = mapped_column(Float, nullable=False)
     return_30d: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -165,8 +165,8 @@ class CongressionalTrade(Base):
     __tablename__ = "congressional_trades"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
-    politician: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
+    politician: Mapped[str] = mapped_column(String(200), nullable=False)
     party: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     chamber: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True
