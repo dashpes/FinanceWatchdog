@@ -31,17 +31,46 @@ from .operations import (
     save_price,
     save_prices,
 )
+from .research_models import (
+    CANDIDATE_STATUSES,
+    CandidateScore,
+    CongressionalTrade,
+    PerformanceTracker,
+    ResearchProfile,
+    ResearchReport,
+    StockCandidate,
+)
+from .research_operations import (
+    get_candidate_by_ticker,
+    get_candidates_by_status,
+    get_latest_report,
+    get_latest_score,
+    get_or_create_default_profile,
+    get_records_needing_update,
+    get_score_history,
+    get_top_candidates,
+    get_trades_for_ticker,
+    save_candidate,
+    save_congressional_trade,
+    save_performance_record,
+    save_profile,
+    save_report,
+    save_score,
+)
 
 __all__ = [
+    # Database
     "init_db",
     "get_session",
     "Base",
+    # Core models
     "Price",
     "InsiderTransaction",
     "NewsItem",
     "AlertSent",
     "EarningsDate",
     "ETFHolding",
+    # Core operations
     "save_price",
     "save_prices",
     "get_latest_price",
@@ -61,4 +90,33 @@ __all__ = [
     "get_upcoming_earnings",
     "save_etf_holdings",
     "get_etf_holdings",
+    # Research models
+    "CANDIDATE_STATUSES",
+    "ResearchProfile",
+    "StockCandidate",
+    "CandidateScore",
+    "ResearchReport",
+    "PerformanceTracker",
+    "CongressionalTrade",
+    # Research operations - Profile
+    "get_or_create_default_profile",
+    "save_profile",
+    # Research operations - Candidate
+    "save_candidate",
+    "get_candidate_by_ticker",
+    "get_candidates_by_status",
+    "get_top_candidates",
+    # Research operations - Score
+    "save_score",
+    "get_latest_score",
+    "get_score_history",
+    # Research operations - Report
+    "save_report",
+    "get_latest_report",
+    # Research operations - Performance
+    "save_performance_record",
+    "get_records_needing_update",
+    # Research operations - Congressional Trade
+    "save_congressional_trade",
+    "get_trades_for_ticker",
 ]
