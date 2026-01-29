@@ -3,6 +3,7 @@
 from .base import BaseCollector, CollectorResult
 from .earnings import EarningsCollector
 from .etf_holdings import ETFHoldingsCollector
+from .fundamentals import FundamentalsCollector, FundamentalsData
 from .insider import InsiderCollector
 from .news import NewsCollector
 from .prices import PriceCollector
@@ -13,6 +14,8 @@ __all__ = [
     "CollectorResult",
     "EarningsCollector",
     "ETFHoldingsCollector",
+    "FundamentalsCollector",
+    "FundamentalsData",
     "InsiderCollector",
     "NewsCollector",
     "PriceCollector",
