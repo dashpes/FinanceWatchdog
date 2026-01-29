@@ -903,3 +903,516 @@ class TestDeduplicatorIntegration:
         assert len(records) == 3
         channels = {r.channel for r in records}
         assert channels == {"console", "slack", "email"}
+
+
+# ============================================================================
+# Alert Rules Tests
+# ============================================================================
+
+from datetime import date, datetime
+from decimal import Decimal
+
+from investment_monitor.alerts import (
+    AlertEngine,
+    check_earnings_alerts,
+    check_insider_alerts,
+    check_news_keyword_alerts,
+    check_price_alerts,
+    check_volume_alerts,
+)
+from investment_monitor.models import (
+    EarningsAlertSettings,
+    Holding,
+    InsiderAlertSettings,
+    NewsAlertSettings,
+    Portfolio,
+    PriceAlertSettings,
+    VolumeAlertSettings,
+)
+from investment_monitor.storage import (
+    EarningsDate,
+    InsiderTransaction,
+    NewsItem,
+    Price,
+    save_earnings_date,
+    save_insider_transaction,
+    save_news_item,
+    save_price,
+)
+
+
+@pytest.fixture
+def portfolio():
+    """Create a test portfolio."""
+    return Portfolio(
+        holdings=[
+            Holding(ticker="AAPL", shares=Decimal("100"), cost_basis=Decimal("150.00")),
+            Holding(ticker="MSFT", shares=Decimal("50"), cost_basis=Decimal("350.00")),
+        ],
+        watchlist=[],
+    )
+
+
+class TestPriceAlertRules:
+    """Tests for price-based alert rules."""
+
+    def test_daily_drop_alert(self, db_session, portfolio):
+        """Test that daily drop alert triggers when threshold is exceeded."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        # Create prices showing a 6% drop
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=100.0))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=94.0))
+
+        config = PriceAlertSettings(daily_drop_pct=3.0)
+        alerts = check_price_alerts(db_session, portfolio, config)
+
+        aapl_alerts = [a for a in alerts if a.ticker == "AAPL"]
+        assert len(aapl_alerts) >= 1
+        assert any("dropped" in a.title.lower() for a in aapl_alerts)
+        assert any(a.alert_type == "price_daily_drop" for a in aapl_alerts)
+
+    def test_daily_rise_alert(self, db_session, portfolio):
+        """Test that daily rise alert triggers when threshold is exceeded."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        # Create prices showing a 7% rise
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=100.0))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=107.0))
+
+        config = PriceAlertSettings(daily_rise_pct=5.0)
+        alerts = check_price_alerts(db_session, portfolio, config)
+
+        aapl_alerts = [a for a in alerts if a.ticker == "AAPL"]
+        assert len(aapl_alerts) >= 1
+        assert any("rose" in a.title.lower() for a in aapl_alerts)
+
+    def test_weekly_drop_alert(self, db_session, portfolio):
+        """Test that weekly drop alert triggers."""
+        today = date.today()
+
+        # Create 7 days of prices showing 10% weekly drop
+        for i in range(7):
+            d = today - timedelta(days=i)
+            # Latest price 100, price 6 days ago was ~111 (10% drop)
+            close = 100.0 if i == 0 else 100.0 + (i * 1.85)
+            save_price(db_session, Price(ticker="AAPL", date=d, close=close))
+
+        config = PriceAlertSettings(weekly_drop_pct=7.0)
+        alerts = check_price_alerts(db_session, portfolio, config)
+
+        weekly_alerts = [a for a in alerts if "week" in a.title.lower()]
+        assert len(weekly_alerts) >= 1
+
+    def test_below_cost_basis_alert(self, db_session, portfolio):
+        """Test alert when price falls below cost basis."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        # AAPL cost basis is 150, price is 140
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=145.0))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=140.0))
+
+        config = PriceAlertSettings(below_cost_basis=True, daily_drop_pct=10.0)
+        alerts = check_price_alerts(db_session, portfolio, config)
+
+        below_cost_alerts = [a for a in alerts if "cost basis" in a.title.lower()]
+        assert len(below_cost_alerts) == 1
+        assert below_cost_alerts[0].ticker == "AAPL"
+
+    def test_no_alert_when_threshold_not_exceeded(self, db_session, portfolio):
+        """Test that no alert triggers when changes are below threshold."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        # 1% drop, below 3% threshold
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=100.0))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=99.0))
+
+        config = PriceAlertSettings(daily_drop_pct=3.0, below_cost_basis=False)
+        alerts = check_price_alerts(db_session, portfolio, config)
+
+        aapl_drop_alerts = [a for a in alerts if a.ticker == "AAPL" and "drop" in a.title.lower()]
+        assert len(aapl_drop_alerts) == 0
+
+    def test_handles_missing_price_data(self, db_session, portfolio):
+        """Test graceful handling when no price data exists."""
+        config = PriceAlertSettings()
+        alerts = check_price_alerts(db_session, portfolio, config)
+        assert isinstance(alerts, list)
+
+
+class TestVolumeAlertRules:
+    """Tests for volume-based alert rules."""
+
+    def test_volume_spike_alert(self, db_session, portfolio):
+        """Test that volume spike alert triggers."""
+        today = date.today()
+
+        # Create historical prices with normal volume
+        for i in range(25):
+            d = today - timedelta(days=i)
+            # Today: 10M volume, historical: 2M average
+            volume = 10_000_000 if i == 0 else 2_000_000
+            save_price(db_session, Price(ticker="AAPL", date=d, close=150.0, volume=volume))
+
+        config = VolumeAlertSettings(lookback_days=20, multiplier=2.5)
+        alerts = check_volume_alerts(db_session, portfolio, config)
+
+        volume_alerts = [a for a in alerts if a.ticker == "AAPL"]
+        assert len(volume_alerts) >= 1
+        assert any("volume" in a.title.lower() for a in volume_alerts)
+
+    def test_no_volume_alert_when_normal(self, db_session, portfolio):
+        """Test no alert when volume is normal."""
+        today = date.today()
+
+        # All normal volume
+        for i in range(25):
+            d = today - timedelta(days=i)
+            save_price(db_session, Price(ticker="AAPL", date=d, close=150.0, volume=2_000_000))
+
+        config = VolumeAlertSettings(lookback_days=20, multiplier=2.5)
+        alerts = check_volume_alerts(db_session, portfolio, config)
+
+        volume_alerts = [a for a in alerts if a.alert_type == "volume_spike"]
+        assert len(volume_alerts) == 0
+
+    def test_handles_missing_volume_data(self, db_session, portfolio):
+        """Test graceful handling when volume data is missing."""
+        today = date.today()
+
+        for i in range(5):
+            d = today - timedelta(days=i)
+            save_price(db_session, Price(ticker="AAPL", date=d, close=150.0, volume=None))
+
+        config = VolumeAlertSettings()
+        alerts = check_volume_alerts(db_session, portfolio, config)
+        assert isinstance(alerts, list)
+
+
+class TestInsiderAlertRules:
+    """Tests for insider trading alert rules."""
+
+    def test_significant_buy_alert(self, db_session, portfolio):
+        """Test alert for significant insider buy."""
+        today = date.today()
+
+        txn = InsiderTransaction(
+            ticker="AAPL",
+            filing_date=today,
+            trade_date=today,
+            owner_name="John Smith",
+            owner_title="Director",
+            transaction_type="P",
+            shares=10000,
+            price_per_share=150.0,
+            total_value=1_500_000.0,
+            sec_url="https://sec.gov/filing/rule_test_123",
+        )
+        save_insider_transaction(db_session, txn)
+
+        config = InsiderAlertSettings(min_buy_value=100_000)
+        alerts = check_insider_alerts(db_session, portfolio, config)
+
+        buy_alerts = [a for a in alerts if "buy" in a.alert_type.lower()]
+        assert len(buy_alerts) >= 1
+        assert any("John Smith" in a.title for a in buy_alerts)
+
+    def test_significant_sell_alert(self, db_session, portfolio):
+        """Test alert for significant insider sell."""
+        today = date.today()
+
+        txn = InsiderTransaction(
+            ticker="AAPL",
+            filing_date=today,
+            trade_date=today,
+            owner_name="Jane Doe",
+            owner_title="VP",
+            transaction_type="S",
+            shares=5000,
+            price_per_share=150.0,
+            total_value=750_000.0,
+            sec_url="https://sec.gov/filing/rule_test_456",
+        )
+        save_insider_transaction(db_session, txn)
+
+        config = InsiderAlertSettings(min_sell_value=500_000)
+        alerts = check_insider_alerts(db_session, portfolio, config)
+
+        sell_alerts = [a for a in alerts if "sell" in a.alert_type.lower()]
+        assert len(sell_alerts) >= 1
+        assert any("Jane Doe" in a.title for a in sell_alerts)
+
+    def test_ceo_cfo_alert_any_size(self, db_session, portfolio):
+        """Test alert for CEO/CFO transactions at any size."""
+        today = date.today()
+
+        # Small CEO purchase
+        txn = InsiderTransaction(
+            ticker="AAPL",
+            filing_date=today,
+            trade_date=today,
+            owner_name="Tim Cook",
+            owner_title="CEO",
+            transaction_type="P",
+            shares=100,
+            price_per_share=150.0,
+            total_value=15_000.0,  # Below normal threshold
+            sec_url="https://sec.gov/filing/rule_test_789",
+        )
+        save_insider_transaction(db_session, txn)
+
+        config = InsiderAlertSettings(
+            min_buy_value=100_000,
+            alert_ceo_cfo_any=True,
+        )
+        alerts = check_insider_alerts(db_session, portfolio, config)
+
+        exec_alerts = [a for a in alerts if "executive" in a.alert_type.lower() or "Tim Cook" in a.title]
+        assert len(exec_alerts) >= 1
+
+    def test_cluster_buying_alert(self, db_session, portfolio):
+        """Test alert for cluster buying (multiple insiders)."""
+        today = date.today()
+
+        for i, name in enumerate(["Insider A", "Insider B", "Insider C"]):
+            txn = InsiderTransaction(
+                ticker="AAPL",
+                filing_date=today,
+                trade_date=today - timedelta(days=i),
+                owner_name=name,
+                owner_title="Director",
+                transaction_type="P",
+                shares=1000,
+                price_per_share=150.0,
+                total_value=150_000.0,
+                sec_url=f"https://sec.gov/filing/cluster_rule_{i}",
+            )
+            save_insider_transaction(db_session, txn)
+
+        config = InsiderAlertSettings(cluster_threshold=3, cluster_days=7)
+        alerts = check_insider_alerts(db_session, portfolio, config)
+
+        cluster_alerts = [a for a in alerts if "cluster" in a.alert_type.lower()]
+        assert len(cluster_alerts) >= 1
+        assert any("3 insiders" in a.title for a in cluster_alerts)
+
+    def test_no_alert_below_threshold(self, db_session, portfolio):
+        """Test no alert when transaction is below threshold."""
+        today = date.today()
+
+        txn = InsiderTransaction(
+            ticker="AAPL",
+            filing_date=today,
+            trade_date=today,
+            owner_name="Small Timer",
+            owner_title="Director",
+            transaction_type="P",
+            shares=100,
+            price_per_share=150.0,
+            total_value=15_000.0,
+            sec_url="https://sec.gov/filing/small_rule",
+        )
+        save_insider_transaction(db_session, txn)
+
+        config = InsiderAlertSettings(min_buy_value=100_000, alert_ceo_cfo_any=False)
+        alerts = check_insider_alerts(db_session, portfolio, config)
+
+        buy_alerts = [a for a in alerts if a.alert_type == "insider_buy"]
+        assert len(buy_alerts) == 0
+
+
+class TestEarningsAlertRules:
+    """Tests for earnings-related alert rules."""
+
+    def test_earnings_tomorrow_alert(self, db_session, portfolio):
+        """Test high-priority alert for earnings tomorrow."""
+        tomorrow = date.today() + timedelta(days=1)
+
+        earnings = EarningsDate(ticker="AAPL", earnings_date=tomorrow, confirmed=True)
+        save_earnings_date(db_session, earnings)
+
+        config = EarningsAlertSettings(lookahead_days=7)
+        alerts = check_earnings_alerts(db_session, portfolio, config)
+
+        assert len(alerts) >= 1
+        aapl_alerts = [a for a in alerts if a.ticker == "AAPL"]
+        assert len(aapl_alerts) >= 1
+        assert any(a.priority == Priority.HIGH for a in aapl_alerts)
+
+    def test_earnings_in_week_alert(self, db_session, portfolio):
+        """Test medium-priority alert for earnings in a few days."""
+        earnings_date = date.today() + timedelta(days=3)
+
+        earnings = EarningsDate(ticker="MSFT", earnings_date=earnings_date, confirmed=False)
+        save_earnings_date(db_session, earnings)
+
+        config = EarningsAlertSettings(lookahead_days=7)
+        alerts = check_earnings_alerts(db_session, portfolio, config)
+
+        msft_alerts = [a for a in alerts if a.ticker == "MSFT"]
+        assert len(msft_alerts) >= 1
+        assert any(a.priority == Priority.MEDIUM for a in msft_alerts)
+
+    def test_no_alert_beyond_lookahead(self, db_session, portfolio):
+        """Test no alert for earnings beyond lookahead window."""
+        far_future = date.today() + timedelta(days=30)
+
+        earnings = EarningsDate(ticker="AAPL", earnings_date=far_future, confirmed=True)
+        save_earnings_date(db_session, earnings)
+
+        config = EarningsAlertSettings(lookahead_days=7)
+        alerts = check_earnings_alerts(db_session, portfolio, config)
+
+        aapl_alerts = [a for a in alerts if a.ticker == "AAPL"]
+        assert len(aapl_alerts) == 0
+
+
+class TestNewsAlertRules:
+    """Tests for news keyword alert rules."""
+
+    def test_keyword_match_alert(self, db_session, portfolio):
+        """Test alert when headline matches keyword."""
+        news = NewsItem(
+            ticker="AAPL",
+            headline="Apple faces SEC investigation over accounting practices",
+            source="Reuters",
+            url="https://example.com/news/rule_1",
+            published_at=datetime.now(),
+            relevance_score=8.0,
+        )
+        save_news_item(db_session, news)
+
+        config = NewsAlertSettings(keywords=["SEC", "investigation", "lawsuit"])
+        alerts = check_news_keyword_alerts(db_session, portfolio, config)
+
+        assert len(alerts) >= 1
+        assert any("SEC" in a.title or "investigation" in a.title for a in alerts)
+        assert any(a.priority == Priority.HIGH for a in alerts)
+
+    def test_multiple_keyword_match(self, db_session, portfolio):
+        """Test alert captures multiple matching keywords."""
+        news = NewsItem(
+            ticker="AAPL",
+            headline="Apple announces merger and acquisition of AI startup",
+            source="Bloomberg",
+            url="https://example.com/news/rule_2",
+            published_at=datetime.now(),
+            relevance_score=7.0,
+        )
+        save_news_item(db_session, news)
+
+        config = NewsAlertSettings(keywords=["merger", "acquisition", "buyback"])
+        alerts = check_news_keyword_alerts(db_session, portfolio, config)
+
+        assert len(alerts) >= 1
+        assert any("merger" in a.body.lower() for a in alerts)
+
+    def test_no_alert_low_relevance(self, db_session, portfolio):
+        """Test no alert when relevance score is too low."""
+        news = NewsItem(
+            ticker="AAPL",
+            headline="Apple releases new product with minor SEC filing",
+            source="TechNews",
+            url="https://example.com/news/rule_3",
+            published_at=datetime.now(),
+            relevance_score=2.0,
+        )
+        save_news_item(db_session, news)
+
+        config = NewsAlertSettings(keywords=["SEC"], min_relevance_score=5.0)
+        alerts = check_news_keyword_alerts(db_session, portfolio, config)
+
+        assert len(alerts) == 0
+
+    def test_no_alert_no_keyword_match(self, db_session, portfolio):
+        """Test no alert when no keywords match."""
+        news = NewsItem(
+            ticker="AAPL",
+            headline="Apple reports strong quarterly results",
+            source="CNBC",
+            url="https://example.com/news/rule_4",
+            published_at=datetime.now(),
+        )
+        save_news_item(db_session, news)
+
+        config = NewsAlertSettings(keywords=["lawsuit", "bankruptcy", "fraud"])
+        alerts = check_news_keyword_alerts(db_session, portfolio, config)
+
+        assert len(alerts) == 0
+
+
+class TestAlertEngineRules:
+    """Tests for the AlertEngine class."""
+
+    def test_run_all_checks(self, db_session, portfolio, default_config):
+        """Test running all checks at once."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=100.0, volume=1_000_000))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=92.0, volume=5_000_000))
+
+        engine = AlertEngine(db_session, portfolio, default_config)
+        alerts = engine.run_all_checks()
+
+        assert isinstance(alerts, list)
+
+    def test_disabled_checks_skipped(self, db_session, portfolio):
+        """Test that disabled checks are skipped."""
+        config = AlertsConfig(
+            price=PriceAlertSettings(enabled=False),
+            volume=VolumeAlertSettings(enabled=False),
+            insider=InsiderAlertSettings(enabled=False),
+            earnings=EarningsAlertSettings(enabled=False),
+            news=NewsAlertSettings(enabled=False),
+        )
+
+        engine = AlertEngine(db_session, portfolio, config)
+        alerts = engine.run_all_checks()
+
+        assert len(alerts) == 0
+
+    def test_individual_check_methods(self, db_session, portfolio, default_config):
+        """Test individual check methods."""
+        engine = AlertEngine(db_session, portfolio, default_config)
+
+        assert isinstance(engine.run_price_checks(), list)
+        assert isinstance(engine.run_volume_checks(), list)
+        assert isinstance(engine.run_insider_checks(), list)
+        assert isinstance(engine.run_earnings_checks(), list)
+        assert isinstance(engine.run_news_checks(), list)
+
+    def test_alerts_sorted_by_priority(self, db_session, portfolio):
+        """Test that alerts are sorted by priority (HIGH first)."""
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        yesterday = today - timedelta(days=1)
+
+        save_price(db_session, Price(ticker="AAPL", date=yesterday, close=100.0))
+        save_price(db_session, Price(ticker="AAPL", date=today, close=90.0))
+
+        save_earnings_date(db_session, EarningsDate(ticker="MSFT", earnings_date=tomorrow, confirmed=True))
+
+        config = AlertsConfig(
+            price=PriceAlertSettings(enabled=True, daily_drop_pct=3.0),
+            earnings=EarningsAlertSettings(enabled=True, lookahead_days=7),
+            volume=VolumeAlertSettings(enabled=False),
+            insider=InsiderAlertSettings(enabled=False),
+            news=NewsAlertSettings(enabled=False),
+        )
+
+        engine = AlertEngine(db_session, portfolio, config)
+        alerts = engine.run_all_checks()
+
+        if len(alerts) >= 2:
+            high_alerts = [a for a in alerts if a.priority == Priority.HIGH]
+            if high_alerts:
+                first_high_idx = alerts.index(high_alerts[0])
+                low_alerts = [a for a in alerts if a.priority == Priority.LOW]
+                if low_alerts:
+                    first_low_idx = alerts.index(low_alerts[0])
+                    assert first_high_idx < first_low_idx
