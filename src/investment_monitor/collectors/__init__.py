@@ -6,6 +6,7 @@ from .etf_holdings import ETFHoldingsCollector
 from .insider import InsiderCollector
 from .news import NewsCollector
 from .prices import PriceCollector
+from .universe import UniverseCollector
 
 __all__ = [
     "BaseCollector",
@@ -15,4 +16,5 @@ __all__ = [
     "InsiderCollector",
     "NewsCollector",
     "PriceCollector",
+    "UniverseCollector",
 ]
