@@ -788,7 +788,7 @@ class TestNewsCollectorCollect:
         mock_parse.return_value = MockFeed(entries=[mock_entry])
         mock_exists.return_value = True  # URL already exists
 
-        result = await news_collector.collect(["AAPL"])
+        await news_collector.collect(["AAPL"])
 
         # No new records should be saved
         mock_save.assert_not_called()
@@ -1462,3 +1462,871 @@ class TestETFHoldingsCollectorIntegration:
                 assert isinstance(holding["ticker"], str)
                 assert isinstance(holding["weight"], (int, float))
                 assert isinstance(holding["shares"], int)
+
+
+# ============================================================================
+# InsiderCollector Tests
+# ============================================================================
+
+
+from investment_monitor.collectors.insider import InsiderCollector
+from investment_monitor.storage import InsiderTransaction
+
+
+# Sample Form 4 XML content for testing
+SAMPLE_FORM4_XML = """<?xml version="1.0"?>
+<ownershipDocument>
+    <schemaVersion>X0306</schemaVersion>
+    <documentType>4</documentType>
+    <periodOfReport>2024-01-15</periodOfReport>
+    <issuer>
+        <issuerCik>0000320193</issuerCik>
+        <issuerName>Apple Inc</issuerName>
+        <issuerTradingSymbol>AAPL</issuerTradingSymbol>
+    </issuer>
+    <reportingOwner>
+        <reportingOwnerId>
+            <rptOwnerCik>0001214156</rptOwnerCik>
+            <rptOwnerName>COOK TIMOTHY D</rptOwnerName>
+        </reportingOwnerId>
+        <reportingOwnerAddress>
+            <rptOwnerStreet1>ONE APPLE PARK WAY</rptOwnerStreet1>
+            <rptOwnerCity>CUPERTINO</rptOwnerCity>
+            <rptOwnerState>CA</rptOwnerState>
+            <rptOwnerZipCode>95014</rptOwnerZipCode>
+        </reportingOwnerAddress>
+        <reportingOwnerRelationship>
+            <isDirector>0</isDirector>
+            <isOfficer>1</isOfficer>
+            <isTenPercentOwner>0</isTenPercentOwner>
+            <isOther>0</isOther>
+            <officerTitle>Chief Executive Officer</officerTitle>
+        </reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <securityTitle>
+                <value>Common Stock</value>
+            </securityTitle>
+            <transactionDate>
+                <value>2024-01-15</value>
+            </transactionDate>
+            <transactionCoding>
+                <transactionFormType>4</transactionFormType>
+                <transactionCode>S</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares>
+                    <value>50000</value>
+                </transactionShares>
+                <transactionPricePerShare>
+                    <value>185.50</value>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode>
+                    <value>D</value>
+                </transactionAcquiredDisposedCode>
+            </transactionAmounts>
+        </nonDerivativeTransaction>
+        <nonDerivativeTransaction>
+            <securityTitle>
+                <value>Common Stock</value>
+            </securityTitle>
+            <transactionDate>
+                <value>2024-01-14</value>
+            </transactionDate>
+            <transactionCoding>
+                <transactionFormType>4</transactionFormType>
+                <transactionCode>P</transactionCode>
+                <equitySwapInvolved>0</equitySwapInvolved>
+            </transactionCoding>
+            <transactionAmounts>
+                <transactionShares>
+                    <value>10000</value>
+                </transactionShares>
+                <transactionPricePerShare>
+                    <value>180.25</value>
+                </transactionPricePerShare>
+                <transactionAcquiredDisposedCode>
+                    <value>A</value>
+                </transactionAcquiredDisposedCode>
+            </transactionAmounts>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+</ownershipDocument>
+"""
+
+# Sample SEC EDGAR atom feed response
+SAMPLE_ATOM_FEED = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <company-info>
+    <cik>0000320193</cik>
+    <conformed-name>APPLE INC</conformed-name>
+  </company-info>
+  <entry>
+    <title>4 - COOK TIMOTHY D</title>
+    <link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/0000320193-24-000001-index.htm"/>
+    <updated>2024-01-16T00:00:00-05:00</updated>
+  </entry>
+  <entry>
+    <title>4 - WILLIAMS JEFFREY E</title>
+    <link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/320193/000032019324000002/0000320193-24-000002-index.htm"/>
+    <updated>2024-01-15T00:00:00-05:00</updated>
+  </entry>
+</feed>
+"""
+
+# Sample filing index page
+SAMPLE_INDEX_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><title>EDGAR Filing Index</title></head>
+<body>
+<h1>Form 4</h1>
+<table>
+  <tr>
+    <td>4</td>
+    <td><a href="/Archives/edgar/data/320193/000032019324000001/xslForm4X01/form4.xml">form4.xml</a></td>
+  </tr>
+</table>
+</body>
+</html>
+"""
+
+
+class TestInsiderCollector:
+    """Tests for InsiderCollector."""
+
+    @pytest.fixture
+    def insider_collector(self, mock_session, mock_config):
+        """Create an InsiderCollector instance."""
+        return InsiderCollector(mock_session, mock_config)
+
+    def test_collector_attributes(self, insider_collector):
+        """Should have correct class attributes."""
+        assert insider_collector.name == "insider"
+        assert insider_collector.rate_limit_calls == 10
+        assert insider_collector.rate_limit_period == 1
+
+    def test_parse_form4_extracts_owner_info(self, insider_collector):
+        """Should correctly extract owner name and title from Form 4."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        assert len(transactions) == 2
+        assert all(t.owner_name == "COOK TIMOTHY D" for t in transactions)
+        assert all(t.owner_title == "Chief Executive Officer" for t in transactions)
+
+    def test_parse_form4_extracts_transaction_type(self, insider_collector):
+        """Should correctly parse transaction type (buy/sell - P/S)."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        # Sort by shares to get consistent order
+        transactions_sorted = sorted(transactions, key=lambda t: t.shares)
+
+        # First transaction (10000 shares) is a purchase
+        assert transactions_sorted[0].transaction_type == "P"
+        # Second transaction (50000 shares) is a sale
+        assert transactions_sorted[1].transaction_type == "S"
+
+    def test_parse_form4_extracts_shares_and_price(self, insider_collector):
+        """Should extract shares and price per share correctly."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        # Sort by shares for consistent order
+        transactions_sorted = sorted(transactions, key=lambda t: t.shares)
+
+        # Purchase: 10000 shares at $180.25
+        assert transactions_sorted[0].shares == 10000
+        assert transactions_sorted[0].price_per_share == 180.25
+
+        # Sale: 50000 shares at $185.50
+        assert transactions_sorted[1].shares == 50000
+        assert transactions_sorted[1].price_per_share == 185.50
+
+    def test_parse_form4_calculates_total_value(self, insider_collector):
+        """Should calculate total transaction value."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        # Sort by shares for consistent order
+        transactions_sorted = sorted(transactions, key=lambda t: t.shares)
+
+        # Purchase: 10000 * 180.25 = 1,802,500
+        assert transactions_sorted[0].total_value == 10000 * 180.25
+
+        # Sale: 50000 * 185.50 = 9,275,000
+        assert transactions_sorted[1].total_value == 50000 * 185.50
+
+    def test_parse_form4_stores_sec_url(self, insider_collector):
+        """Should store SEC filing URL for reference."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        assert all("https://example.com/filing" in t.sec_url for t in transactions)
+
+    def test_parse_form4_extracts_dates(self, insider_collector):
+        """Should extract filing and trade dates."""
+        transactions = insider_collector._parse_form4(
+            SAMPLE_FORM4_XML, "AAPL", "https://example.com/filing"
+        )
+
+        # All should have the same filing date (period of report)
+        assert all(t.filing_date == date(2024, 1, 15) for t in transactions)
+
+        # Trade dates should match individual transactions
+        transactions_sorted = sorted(transactions, key=lambda t: t.shares)
+        assert transactions_sorted[0].trade_date == date(2024, 1, 14)  # Purchase
+        assert transactions_sorted[1].trade_date == date(2024, 1, 15)  # Sale
+
+    def test_parse_form4_handles_director_title(self, insider_collector):
+        """Should extract Director as title when isDirector is true."""
+        xml_with_director = """<?xml version="1.0"?>
+        <ownershipDocument>
+            <periodOfReport>2024-01-15</periodOfReport>
+            <reportingOwner>
+                <reportingOwnerId>
+                    <rptOwnerName>BOARD MEMBER</rptOwnerName>
+                </reportingOwnerId>
+                <reportingOwnerRelationship>
+                    <isDirector>1</isDirector>
+                    <isOfficer>0</isOfficer>
+                    <isTenPercentOwner>0</isTenPercentOwner>
+                    <isOther>0</isOther>
+                </reportingOwnerRelationship>
+            </reportingOwner>
+            <nonDerivativeTable>
+                <nonDerivativeTransaction>
+                    <transactionDate><value>2024-01-15</value></transactionDate>
+                    <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+                    <transactionAmounts>
+                        <transactionShares><value>1000</value></transactionShares>
+                        <transactionPricePerShare><value>100.00</value></transactionPricePerShare>
+                    </transactionAmounts>
+                </nonDerivativeTransaction>
+            </nonDerivativeTable>
+        </ownershipDocument>
+        """
+
+        transactions = insider_collector._parse_form4(
+            xml_with_director, "TEST", "https://example.com/filing"
+        )
+
+        assert len(transactions) == 1
+        assert transactions[0].owner_title == "Director"
+
+    def test_parse_form4_handles_ten_percent_owner(self, insider_collector):
+        """Should extract 10% Owner as title when isTenPercentOwner is true."""
+        xml_with_10pct = """<?xml version="1.0"?>
+        <ownershipDocument>
+            <periodOfReport>2024-01-15</periodOfReport>
+            <reportingOwner>
+                <reportingOwnerId>
+                    <rptOwnerName>BIG INVESTOR LLC</rptOwnerName>
+                </reportingOwnerId>
+                <reportingOwnerRelationship>
+                    <isDirector>0</isDirector>
+                    <isOfficer>0</isOfficer>
+                    <isTenPercentOwner>1</isTenPercentOwner>
+                    <isOther>0</isOther>
+                </reportingOwnerRelationship>
+            </reportingOwner>
+            <nonDerivativeTable>
+                <nonDerivativeTransaction>
+                    <transactionDate><value>2024-01-15</value></transactionDate>
+                    <transactionCoding><transactionCode>S</transactionCode></transactionCoding>
+                    <transactionAmounts>
+                        <transactionShares><value>500000</value></transactionShares>
+                        <transactionPricePerShare><value>50.00</value></transactionPricePerShare>
+                    </transactionAmounts>
+                </nonDerivativeTransaction>
+            </nonDerivativeTable>
+        </ownershipDocument>
+        """
+
+        transactions = insider_collector._parse_form4(
+            xml_with_10pct, "TEST", "https://example.com/filing"
+        )
+
+        assert len(transactions) == 1
+        assert transactions[0].owner_title == "10% Owner"
+
+    def test_parse_form4_skips_zero_share_transactions(self, insider_collector):
+        """Should skip transactions with zero shares."""
+        xml_with_zero_shares = """<?xml version="1.0"?>
+        <ownershipDocument>
+            <periodOfReport>2024-01-15</periodOfReport>
+            <reportingOwner>
+                <reportingOwnerId>
+                    <rptOwnerName>TEST PERSON</rptOwnerName>
+                </reportingOwnerId>
+            </reportingOwner>
+            <nonDerivativeTable>
+                <nonDerivativeTransaction>
+                    <transactionDate><value>2024-01-15</value></transactionDate>
+                    <transactionCoding><transactionCode>P</transactionCode></transactionCoding>
+                    <transactionAmounts>
+                        <transactionShares><value>0</value></transactionShares>
+                        <transactionPricePerShare><value>100.00</value></transactionPricePerShare>
+                    </transactionAmounts>
+                </nonDerivativeTransaction>
+            </nonDerivativeTable>
+        </ownershipDocument>
+        """
+
+        transactions = insider_collector._parse_form4(
+            xml_with_zero_shares, "TEST", "https://example.com/filing"
+        )
+
+        assert len(transactions) == 0
+
+    def test_find_xml_url_extracts_form4_link(self, insider_collector):
+        """Should find XML file URL from index page."""
+        xml_url = insider_collector._find_xml_url(
+            SAMPLE_INDEX_PAGE,
+            "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/0000320193-24-000001-index.htm",
+        )
+
+        assert xml_url is not None
+        assert xml_url.endswith(".xml")
+        assert "form4" in xml_url.lower()
+
+    @pytest.mark.asyncio
+    async def test_collect_handles_no_cik(self, insider_collector):
+        """Should handle tickers with no CIK gracefully."""
+        with patch.object(
+            insider_collector, "_get_cik_for_ticker", new_callable=AsyncMock
+        ) as mock_get_cik:
+            mock_get_cik.return_value = None
+
+            result = await insider_collector.collect_single("INVALID")
+
+            assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_collect_handles_no_filings(self, insider_collector):
+        """Should handle tickers with no Form 4 filings."""
+        with patch.object(
+            insider_collector, "_get_cik_for_ticker", new_callable=AsyncMock
+        ) as mock_get_cik:
+            with patch.object(
+                insider_collector, "_get_form4_filings", new_callable=AsyncMock
+            ) as mock_get_filings:
+                mock_get_cik.return_value = "320193"
+                mock_get_filings.return_value = []
+
+                result = await insider_collector.collect_single("AAPL")
+
+                assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_collect_deduplicates_by_sec_url(self, mock_session, mock_config):
+        """Should skip filings that already exist in database."""
+        collector = InsiderCollector(mock_session, mock_config)
+
+        with patch.object(
+            collector, "_get_cik_for_ticker", new_callable=AsyncMock
+        ) as mock_get_cik:
+            with patch.object(
+                collector, "_get_form4_filings", new_callable=AsyncMock
+            ) as mock_get_filings:
+                with patch(
+                    "investment_monitor.collectors.insider.insider_transaction_exists"
+                ) as mock_exists:
+                    mock_get_cik.return_value = "320193"
+                    mock_get_filings.return_value = [
+                        "https://www.sec.gov/filing1",
+                        "https://www.sec.gov/filing2",
+                    ]
+                    # Both filings already exist
+                    mock_exists.return_value = True
+
+                    result = await collector.collect_single("AAPL")
+
+                    # Should have checked existence for both filings
+                    assert mock_exists.call_count >= 2
+                    # No new records saved
+                    assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_collect_multiple_tickers(self, mock_session, mock_config):
+        """Should collect data for multiple tickers."""
+        collector = InsiderCollector(mock_session, mock_config)
+
+        with patch.object(
+            collector, "collect_single", new_callable=AsyncMock
+        ) as mock_collect_single:
+            mock_collect_single.side_effect = [5, 3, 2]
+
+            result = await collector.collect(["AAPL", "GOOGL", "MSFT"])
+
+            assert result.records_collected == 10
+            assert result.success
+            assert len(result.errors) == 0
+
+    @pytest.mark.asyncio
+    async def test_collect_handles_partial_failures(self, mock_session, mock_config):
+        """Should continue collecting after individual ticker failures."""
+        collector = InsiderCollector(mock_session, mock_config)
+
+        async def mock_retry_with_backoff(func, ticker):
+            """Mock _retry_with_backoff to raise error for FAIL ticker."""
+            if ticker == "FAIL":
+                raise Exception("API Error for FAIL")
+            return await func(ticker)
+
+        with patch.object(
+            collector, "_retry_with_backoff", side_effect=mock_retry_with_backoff
+        ):
+            with patch.object(
+                collector, "collect_single", new_callable=AsyncMock
+            ) as mock_collect_single:
+                mock_collect_single.side_effect = [5, 3]  # Only successful results
+
+                result = await collector.collect(["AAPL", "FAIL", "MSFT"])
+
+                assert result.records_collected == 8  # 5 + 3
+                assert not result.success
+                assert len(result.errors) == 1
+                assert "FAIL" in result.errors[0]
+
+    def test_get_bool_handles_various_formats(self, insider_collector):
+        """Should parse boolean values correctly."""
+        from bs4 import BeautifulSoup
+
+        # Test "1" -> True
+        soup = BeautifulSoup("<elem>1</elem>", "xml")
+        assert insider_collector._get_bool(soup.find("elem")) is True
+
+        # Test "true" -> True
+        soup = BeautifulSoup("<elem>true</elem>", "xml")
+        assert insider_collector._get_bool(soup.find("elem")) is True
+
+        # Test "0" -> False
+        soup = BeautifulSoup("<elem>0</elem>", "xml")
+        assert insider_collector._get_bool(soup.find("elem")) is False
+
+        # Test "false" -> False
+        soup = BeautifulSoup("<elem>false</elem>", "xml")
+        assert insider_collector._get_bool(soup.find("elem")) is False
+
+        # Test None -> False
+        assert insider_collector._get_bool(None) is False
+
+    def test_extract_owner_name_fallback(self, insider_collector):
+        """Should return 'Unknown' when owner name not found."""
+        from bs4 import BeautifulSoup
+
+        empty_xml = "<ownershipDocument></ownershipDocument>"
+        soup = BeautifulSoup(empty_xml, "xml")
+
+        name = insider_collector._extract_owner_name(soup)
+        assert name == "Unknown"
+
+    def test_parse_form4_handles_derivative_transactions(self, insider_collector):
+        """Should parse derivative transactions (stock options, etc.)."""
+        xml_with_derivative = """<?xml version="1.0"?>
+        <ownershipDocument>
+            <periodOfReport>2024-01-15</periodOfReport>
+            <reportingOwner>
+                <reportingOwnerId>
+                    <rptOwnerName>OPTION HOLDER</rptOwnerName>
+                </reportingOwnerId>
+                <reportingOwnerRelationship>
+                    <isOfficer>1</isOfficer>
+                    <officerTitle>VP</officerTitle>
+                </reportingOwnerRelationship>
+            </reportingOwner>
+            <derivativeTable>
+                <derivativeTransaction>
+                    <transactionDate><value>2024-01-15</value></transactionDate>
+                    <transactionCoding><transactionCode>M</transactionCode></transactionCoding>
+                    <transactionAmounts>
+                        <transactionShares><value>5000</value></transactionShares>
+                        <transactionPricePerShare><value>0.00</value></transactionPricePerShare>
+                    </transactionAmounts>
+                </derivativeTransaction>
+            </derivativeTable>
+        </ownershipDocument>
+        """
+
+        transactions = insider_collector._parse_form4(
+            xml_with_derivative, "TEST", "https://example.com/filing"
+        )
+
+        assert len(transactions) == 1
+        assert transactions[0].owner_name == "OPTION HOLDER"
+        assert transactions[0].transaction_type == "P"  # M (exercise) maps to P
+        assert transactions[0].shares == 5000
+
+
+# ============================================================================
+# PriceCollector Tests
+# ============================================================================
+
+import pandas as pd
+from investment_monitor.collectors.prices import PriceCollector
+from investment_monitor.storage.models import Price
+
+
+@pytest.fixture
+def price_collector(mock_session, mock_config):
+    """Create a PriceCollector instance."""
+    return PriceCollector(mock_session, mock_config, days_to_fetch=30)
+
+
+class TestPriceCollectorInit:
+    """Tests for PriceCollector initialization."""
+
+    def test_initialization(self, mock_session, mock_config):
+        """Should initialize with correct attributes."""
+        collector = PriceCollector(mock_session, mock_config)
+
+        assert collector.name == "prices"
+        assert collector.rate_limit_calls == 30
+        assert collector.rate_limit_period == 60
+        assert collector.days_to_fetch == 30
+
+    def test_custom_days_to_fetch(self, mock_session, mock_config):
+        """Should accept custom days_to_fetch parameter."""
+        collector = PriceCollector(mock_session, mock_config, days_to_fetch=60)
+        assert collector.days_to_fetch == 60
+
+
+class TestPriceCollectorCollect:
+    """Tests for PriceCollector collect methods."""
+
+    async def test_collect_empty_tickers(self, price_collector):
+        """Should handle empty ticker list."""
+        result = await price_collector.collect([])
+
+        assert result.success
+        assert result.records_collected == 0
+        assert len(result.errors) == 0
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    @patch("investment_monitor.collectors.prices.price_exists")
+    @patch("investment_monitor.collectors.prices.save_price")
+    async def test_collect_single_ticker(
+        self, mock_save_price, mock_price_exists, mock_yf_download, price_collector
+    ):
+        """Should collect data for a single ticker."""
+        # Setup mock data
+        dates = pd.date_range(end=date.today(), periods=5, freq='D')
+        mock_data = pd.DataFrame({
+            'Open': [100.0, 101.0, 102.0, 103.0, 104.0],
+            'High': [105.0, 106.0, 107.0, 108.0, 109.0],
+            'Low': [99.0, 100.0, 101.0, 102.0, 103.0],
+            'Close': [104.0, 105.0, 106.0, 107.0, 108.0],
+            'Volume': [1000000, 1100000, 1200000, 1300000, 1400000],
+        }, index=dates)
+
+        mock_yf_download.return_value = mock_data
+        mock_price_exists.return_value = False
+        mock_save_price.return_value = 1
+
+        result = await price_collector.collect(["AAPL"])
+
+        assert result.success
+        assert result.records_collected == 5
+        assert mock_yf_download.called
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    async def test_collect_handles_empty_data(
+        self, mock_yf_download, price_collector
+    ):
+        """Should handle when yfinance returns empty data."""
+        mock_yf_download.return_value = pd.DataFrame()
+
+        result = await price_collector.collect(["INVALID"])
+
+        assert result.success
+        assert result.records_collected == 0
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    async def test_collect_handles_api_error(
+        self, mock_yf_download, price_collector
+    ):
+        """Should handle yfinance API errors gracefully."""
+        mock_yf_download.side_effect = Exception("API Error")
+
+        result = await price_collector.collect(["AAPL"])
+
+        assert not result.success
+        assert len(result.errors) > 0
+        assert "API Error" in result.errors[0] or "error" in result.errors[0].lower()
+
+
+class TestPriceCollectorCollectSingle:
+    """Tests for PriceCollector collect_single method."""
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    @patch("investment_monitor.collectors.prices.price_exists")
+    @patch("investment_monitor.collectors.prices.save_price")
+    async def test_collect_single_success(
+        self, mock_save_price, mock_price_exists, mock_yf_download, price_collector
+    ):
+        """Should collect data for a single ticker."""
+        # Setup mock data
+        dates = pd.date_range(end=date.today(), periods=3, freq='D')
+        mock_data = pd.DataFrame({
+            'Open': [100.0, 101.0, 102.0],
+            'High': [105.0, 106.0, 107.0],
+            'Low': [99.0, 100.0, 101.0],
+            'Close': [104.0, 105.0, 106.0],
+            'Volume': [1000000, 1100000, 1200000],
+        }, index=dates)
+
+        mock_yf_download.return_value = mock_data
+        mock_price_exists.return_value = False
+        mock_save_price.return_value = 1
+
+        result = await price_collector.collect_single("AAPL")
+
+        assert result == 3
+        assert mock_yf_download.called
+        assert mock_save_price.call_count == 3
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    async def test_collect_single_empty_data(
+        self, mock_yf_download, price_collector
+    ):
+        """Should return 0 when no data available."""
+        mock_yf_download.return_value = pd.DataFrame()
+
+        result = await price_collector.collect_single("INVALID")
+
+        assert result == 0
+
+
+class TestPriceCollectorDuplicateHandling:
+    """Tests for duplicate detection in PriceCollector."""
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    @patch("investment_monitor.collectors.prices.price_exists")
+    @patch("investment_monitor.collectors.prices.save_price")
+    async def test_skips_existing_prices(
+        self, mock_save_price, mock_price_exists, mock_yf_download, price_collector
+    ):
+        """Should skip prices that already exist in database."""
+        dates = pd.date_range(end=date.today(), periods=3, freq='D')
+        mock_data = pd.DataFrame({
+            'Open': [100.0, 101.0, 102.0],
+            'High': [105.0, 106.0, 107.0],
+            'Low': [99.0, 100.0, 101.0],
+            'Close': [104.0, 105.0, 106.0],
+            'Volume': [1000000, 1100000, 1200000],
+        }, index=dates)
+
+        mock_yf_download.return_value = mock_data
+        # First two dates already exist, last one is new
+        mock_price_exists.side_effect = [True, True, False]
+        mock_save_price.return_value = 1
+
+        result = await price_collector.collect_single("AAPL")
+
+        # Only 1 new price should be saved
+        assert result == 1
+        assert mock_save_price.call_count == 1
+
+
+class TestPriceWithChange:
+    """Tests for get_price_with_change method."""
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_no_data(
+        self, mock_get_prices, price_collector
+    ):
+        """Should return None when no price data available."""
+        mock_get_prices.return_value = []
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is None
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_single_day(
+        self, mock_get_prices, price_collector
+    ):
+        """Should handle single day of data."""
+        today = date.today()
+        mock_prices = [
+            MagicMock(
+                ticker="AAPL",
+                date=today,
+                close=150.0,
+                volume=1000000,
+            )
+        ]
+        mock_get_prices.return_value = mock_prices
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is not None
+        assert result["ticker"] == "AAPL"
+        assert result["price"] == 150.0
+        assert result["daily_change_pct"] is None  # No previous day
+        assert result["weekly_change_pct"] is None  # No week-old data
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_daily_calculation(
+        self, mock_get_prices, price_collector
+    ):
+        """Should calculate daily change correctly."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        mock_prices = [
+            MagicMock(ticker="AAPL", date=today, close=105.0, volume=1000000),
+            MagicMock(ticker="AAPL", date=yesterday, close=100.0, volume=900000),
+        ]
+        mock_get_prices.return_value = mock_prices
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is not None
+        assert result["daily_change_pct"] == 5.0  # (105 - 100) / 100 * 100
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_weekly_calculation(
+        self, mock_get_prices, price_collector
+    ):
+        """Should calculate weekly change correctly."""
+        today = date.today()
+
+        # Create 6 days of data (today + 5 previous days)
+        mock_prices = [
+            MagicMock(ticker="AAPL", date=today, close=110.0, volume=1000000),
+            MagicMock(ticker="AAPL", date=today - timedelta(days=1), close=109.0, volume=900000),
+            MagicMock(ticker="AAPL", date=today - timedelta(days=2), close=108.0, volume=950000),
+            MagicMock(ticker="AAPL", date=today - timedelta(days=3), close=107.0, volume=1100000),
+            MagicMock(ticker="AAPL", date=today - timedelta(days=4), close=106.0, volume=1050000),
+            MagicMock(ticker="AAPL", date=today - timedelta(days=5), close=100.0, volume=1000000),
+        ]
+        mock_get_prices.return_value = mock_prices
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is not None
+        assert result["weekly_change_pct"] == 10.0  # (110 - 100) / 100 * 100
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_volume_average(
+        self, mock_get_prices, price_collector
+    ):
+        """Should calculate 20-day average volume."""
+        today = date.today()
+
+        # Create prices with volumes
+        mock_prices = []
+        for i in range(10):
+            mock_prices.append(
+                MagicMock(
+                    ticker="AAPL",
+                    date=today - timedelta(days=i),
+                    close=100.0 + i,
+                    volume=1000000 + (i * 100000),
+                )
+            )
+        mock_get_prices.return_value = mock_prices
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is not None
+        assert result["avg_volume_20d"] is not None
+        # Average of volumes from 1000000 to 1900000
+        expected_avg = sum(1000000 + (i * 100000) for i in range(10)) / 10
+        assert result["avg_volume_20d"] == int(expected_avg)
+
+    @patch("investment_monitor.collectors.prices.get_prices")
+    def test_get_price_with_change_negative_change(
+        self, mock_get_prices, price_collector
+    ):
+        """Should handle negative price changes."""
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+
+        mock_prices = [
+            MagicMock(ticker="AAPL", date=today, close=95.0, volume=1000000),
+            MagicMock(ticker="AAPL", date=yesterday, close=100.0, volume=900000),
+        ]
+        mock_get_prices.return_value = mock_prices
+
+        result = price_collector.get_price_with_change("AAPL")
+
+        assert result is not None
+        assert result["daily_change_pct"] == -5.0  # (95 - 100) / 100 * 100
+
+
+class TestPriceCollectorSafeConversions:
+    """Tests for safe float/int conversion helpers."""
+
+    def test_safe_float_with_valid_value(self, price_collector):
+        """Should convert valid float."""
+        assert price_collector._safe_float(100.5) == 100.5
+        assert price_collector._safe_float("100.5") == 100.5
+        assert price_collector._safe_float(100) == 100.0
+
+    def test_safe_float_with_nan(self, price_collector):
+        """Should return None for NaN."""
+        import math
+        assert price_collector._safe_float(float('nan')) is None
+        assert price_collector._safe_float(math.nan) is None
+
+    def test_safe_float_with_none(self, price_collector):
+        """Should return None for None."""
+        assert price_collector._safe_float(None) is None
+
+    def test_safe_int_with_valid_value(self, price_collector):
+        """Should convert valid int."""
+        assert price_collector._safe_int(100) == 100
+        assert price_collector._safe_int(100.5) == 100
+        assert price_collector._safe_int("100") == 100
+
+    def test_safe_int_with_nan(self, price_collector):
+        """Should return None for NaN."""
+        import math
+        assert price_collector._safe_int(float('nan')) is None
+        assert price_collector._safe_int(math.nan) is None
+
+    def test_safe_int_with_none(self, price_collector):
+        """Should return None for None."""
+        assert price_collector._safe_int(None) is None
+
+
+class TestPriceCollectorMarketHolidays:
+    """Tests for handling market holidays (no trading data)."""
+
+    @patch("investment_monitor.collectors.prices.yf.download")
+    @patch("investment_monitor.collectors.prices.price_exists")
+    @patch("investment_monitor.collectors.prices.save_price")
+    async def test_handles_missing_dates(
+        self, mock_save_price, mock_price_exists, mock_yf_download, price_collector
+    ):
+        """Should handle gaps in data (weekends, holidays)."""
+        # Create data with gaps (only weekdays)
+        dates = pd.bdate_range(end=date.today(), periods=5)  # Business days only
+        mock_data = pd.DataFrame({
+            'Open': [100.0, 101.0, 102.0, 103.0, 104.0],
+            'High': [105.0, 106.0, 107.0, 108.0, 109.0],
+            'Low': [99.0, 100.0, 101.0, 102.0, 103.0],
+            'Close': [104.0, 105.0, 106.0, 107.0, 108.0],
+            'Volume': [1000000, 1100000, 1200000, 1300000, 1400000],
+        }, index=dates)
+
+        mock_yf_download.return_value = mock_data
+        mock_price_exists.return_value = False
+        mock_save_price.return_value = 1
+
+        result = await price_collector.collect(["AAPL"])
+
+        # Should successfully process available data
+        assert result.success
+        assert result.records_collected == 5
