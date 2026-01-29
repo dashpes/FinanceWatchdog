@@ -43,6 +43,7 @@ Example usage:
 
 from .base import AlertMessage, NotificationChannel, Priority
 from .console import ConsoleChannel
+from .digest import format_daily_digest, format_weekly_digest
 from .manager import NotificationManager
 
 __all__ = [
@@ -51,4 +52,6 @@ __all__ = [
     "NotificationChannel",
     "NotificationManager",
     "Priority",
+    "format_daily_digest",
+    "format_weekly_digest",
 ]
