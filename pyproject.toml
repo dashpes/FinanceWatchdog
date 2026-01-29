@@ -43,6 +43,9 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+investment-monitor = "investment_monitor.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_monitor"]
 
