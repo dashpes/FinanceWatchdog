@@ -1,0 +1,13 @@
+channels:
+  console:
+    enabled: true
+
+  slack:
+    enabled: false
+    webhook_url: ""
+
+  email:
+    enabled: false
+    provider: "sendgrid"
+    from_address: ""
+    to_address: ""

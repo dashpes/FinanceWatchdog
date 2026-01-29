@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "investment-monitor"
+version = "0.1.0"
+description = "Personal investment monitoring system"
+requires-python = ">=3.11"
+dependencies = [
+    "yfinance>=0.2.0",
+    "feedparser>=6.0.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=4.9.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "pandas>=2.0.0",
+    "loguru>=0.7.0",
+    "httpx>=0.25.0",
+]
+
+[project.optional-dependencies]
+notifications = [
+    "sendgrid>=6.10.0",
+    "slack-sdk>=3.21.0",
+]
+ai = [
+    "ollama>=0.1.0",
+    "anthropic>=0.18.0",
+]
+dashboard = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "jinja2>=3.1.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/investment_monitor"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

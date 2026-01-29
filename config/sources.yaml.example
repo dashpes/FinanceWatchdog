@@ -1,0 +1,8 @@
+news_feeds:
+  - name: "Yahoo Finance"
+    url: "https://finance.yahoo.com/rss/headline?s={ticker}"
+    per_ticker: true
+
+  - name: "Seeking Alpha"
+    url: "https://seekingalpha.com/market_currents.xml"
+    per_ticker: false

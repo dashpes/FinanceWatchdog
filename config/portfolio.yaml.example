@@ -1,0 +1,15 @@
+holdings:
+  - ticker: AAPL
+    shares: 50
+    cost_basis: 165.00
+    thesis: "Services growth driving margin expansion"
+
+  - ticker: MSFT
+    shares: 30
+    cost_basis: 380.00
+    thesis: "Azure cloud growth, AI integration"
+
+watchlist:
+  - ticker: GOOGL
+    reason: "Waiting for better entry"
+    target_price: 140.00

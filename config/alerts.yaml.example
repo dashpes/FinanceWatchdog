@@ -1,0 +1,24 @@
+price:
+  enabled: true
+  daily_drop_pct: 3.0
+  daily_rise_pct: 5.0
+  weekly_drop_pct: 7.0
+  below_cost_basis: true
+
+volume:
+  enabled: true
+  lookback_days: 20
+  multiplier: 2.5
+
+insider:
+  enabled: true
+  min_buy_value: 100000
+  min_sell_value: 500000
+
+earnings:
+  enabled: true
+  lookahead_days: 7
+
+news:
+  enabled: true
+  min_relevance_score: 5.0
