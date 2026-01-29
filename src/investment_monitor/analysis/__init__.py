@@ -43,6 +43,7 @@ from .research_prompts import (
     SENTIMENT_SCORE_PROMPT,
     VALUE_SCORE_PROMPT,
 )
+from .research_scorer import ResearchScorer, ScoreResult
 
 __all__ = [
     # Local LLM
@@ -66,4 +67,7 @@ __all__ = [
     "SENTIMENT_SCORE_PROMPT",
     "RESEARCH_PROMPTS",
     "PROMPT_PLACEHOLDERS",
+    # Research Scorer
+    "ResearchScorer",
+    "ScoreResult",
 ]
