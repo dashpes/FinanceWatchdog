@@ -317,6 +317,7 @@ class CongressTradesCollector(BaseCollector):
         try:
             self.session.commit()
         except Exception as e:
+            self.session.rollback()
             error_msg = f"Failed to commit: {str(e)}"
             errors.append(error_msg)
             logger.error(f"{self.name}: {error_msg}")
