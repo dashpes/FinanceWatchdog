@@ -1,6 +1,7 @@
 """Data collectors for investment monitoring."""
 
 from .base import BaseCollector, CollectorResult
+from .congress import CongressTradesCollector
 from .earnings import EarningsCollector
 from .etf_holdings import ETFHoldingsCollector
 from .fundamentals import FundamentalsCollector, FundamentalsData
@@ -12,6 +13,7 @@ from .universe import UniverseCollector
 __all__ = [
     "BaseCollector",
     "CollectorResult",
+    "CongressTradesCollector",
     "EarningsCollector",
     "ETFHoldingsCollector",
     "FundamentalsCollector",
