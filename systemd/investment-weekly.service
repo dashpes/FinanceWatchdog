@@ -1,0 +1,11 @@
+[Unit]
+Description=Investment Monitor Weekly Synthesis
+After=network.target
+
+[Service]
+Type=oneshot
+User=your-user
+WorkingDirectory=/opt/investment-monitor
+ExecStart=/opt/investment-monitor/.venv/bin/investment-monitor --type weekly
+Environment=PYTHONUNBUFFERED=1
+Environment=ANTHROPIC_API_KEY=your-key-here

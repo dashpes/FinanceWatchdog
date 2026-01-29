@@ -1,0 +1,15 @@
+[Unit]
+Description=Investment Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=your-user
+WorkingDirectory=/opt/investment-monitor
+ExecStart=/opt/investment-monitor/.venv/bin/investment-monitor --type regular
+Environment=PYTHONUNBUFFERED=1
+# Add your API keys here or use EnvironmentFile
+# EnvironmentFile=/opt/investment-monitor/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Investment Monitor every 4 hours during market hours
+
+[Timer]
+# Run at 6am, 10am, 2pm, 6pm on weekdays
+OnCalendar=Mon..Fri 06:00
+OnCalendar=Mon..Fri 10:00
+OnCalendar=Mon..Fri 14:00
+OnCalendar=Mon..Fri 18:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

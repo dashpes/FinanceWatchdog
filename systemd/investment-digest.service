@@ -1,0 +1,10 @@
+[Unit]
+Description=Investment Monitor Daily Digest
+After=network.target
+
+[Service]
+Type=oneshot
+User=your-user
+WorkingDirectory=/opt/investment-monitor
+ExecStart=/opt/investment-monitor/.venv/bin/investment-monitor --type digest
+Environment=PYTHONUNBUFFERED=1
