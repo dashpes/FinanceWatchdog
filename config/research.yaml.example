@@ -1,0 +1,98 @@
+# Research Configuration
+# This file configures the automated stock research system.
+# Copy this file to research.yaml and customize for your needs.
+
+# ==============================================================================
+# Scoring Weights
+# ==============================================================================
+# Weights for calculating composite investment scores.
+# Each weight must be between 0 and 1, and ALL weights must sum to exactly 1.0.
+# Adjust these to match your investment style:
+#   - Value investors: increase 'value' weight
+#   - Growth investors: increase 'growth' weight
+#   - Conservative investors: increase 'quality' weight
+scoring_weights:
+  # Weight for valuation metrics (P/E, P/B, P/S ratios)
+  value: 0.2
+
+  # Weight for growth metrics (revenue growth, earnings growth)
+  growth: 0.2
+
+  # Weight for quality metrics (ROE, debt ratios, margins)
+  quality: 0.2
+
+  # Weight for price momentum (technical indicators, trends)
+  momentum: 0.2
+
+  # Weight for market sentiment (analyst ratings, news sentiment)
+  sentiment: 0.2
+
+# ==============================================================================
+# Universe Settings
+# ==============================================================================
+# Controls which stocks are included in the research universe.
+universe:
+  # Include S&P 500 constituents in the screening universe
+  include_sp500: true
+
+  # Include Nasdaq 100 constituents in the screening universe
+  include_nasdaq100: true
+
+  # Additional ETFs to extract holdings from (e.g., sector or thematic ETFs)
+  # Example: ["QQQ", "SPY", "VTI", "ARKK"]
+  etf_tickers: []
+
+  # Minimum market capitalization in USD (filters out small caps)
+  # Default: 1 billion ($1,000,000,000)
+  min_market_cap: 1000000000
+
+  # Sectors to exclude from research (GICS sector names)
+  # Example: ["Energy", "Utilities", "Real Estate"]
+  excluded_sectors: []
+
+  # Specific tickers to exclude from research
+  # Example: ["XOM", "CVX", "COIN"]
+  excluded_tickers: []
+
+# ==============================================================================
+# Research Thresholds
+# ==============================================================================
+# Score thresholds for automated actions on researched stocks.
+# All scores are on a 0-100 scale.
+thresholds:
+  # Minimum composite score required to consider a stock for research
+  # Stocks below this threshold are filtered out early
+  min_composite_score: 60.0
+
+  # Score threshold for automatically adding to watchlist
+  # Stocks scoring at or above this are auto-added to watchlist
+  auto_watchlist_score: 75.0
+
+  # Score threshold for automatic rejection
+  # Stocks scoring at or below this are automatically rejected
+  auto_reject_score: 30.0
+
+# ==============================================================================
+# Claude Budget Settings
+# ==============================================================================
+# Controls spending limits for AI-powered research reports.
+# These limits help prevent unexpected API costs.
+claude_budget:
+  # Enable/disable Claude-powered research reports
+  # Set to false to use only quantitative analysis
+  enabled: true
+
+  # Maximum monthly spending limit in USD for Claude API
+  monthly_limit_usd: 50.0
+
+  # Maximum number of AI research reports to generate per day
+  # Helps spread API usage across the month
+  max_reports_per_day: 10
+
+# ==============================================================================
+# Discovery Settings
+# ==============================================================================
+# Number of stocks to process in each discovery batch
+# Higher values = faster discovery but more memory usage
+# Range: 1-500
+discovery_batch_size: 50

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from investment_monitor.analysis import ResearchScorer, ScoreResult
+from investment_monitor.analysis import ResearchScorer
 from investment_monitor.collectors import (
     CollectorResult,
     FundamentalsCollector,
@@ -106,7 +106,6 @@ class TestDiscoveryResult:
         result = DiscoveryResult()
 
         assert result.total_candidates == 0
-        assert result.new_candidates == 0
         assert result.scored_candidates == 0
         assert result.top_candidates == []
         assert result.watchlist_additions == []

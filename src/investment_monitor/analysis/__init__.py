@@ -44,6 +44,11 @@ from .research_prompts import (
     VALUE_SCORE_PROMPT,
 )
 from .research_scorer import ResearchScorer, ScoreResult
+from .research_report import (
+    RESEARCH_REPORT_PROMPT,
+    ReportResult,
+    ResearchReportGenerator,
+)
 
 __all__ = [
     # Local LLM
@@ -70,4 +75,8 @@ __all__ = [
     # Research Scorer
     "ResearchScorer",
     "ScoreResult",
+    # Research Report Generator
+    "ResearchReportGenerator",
+    "ReportResult",
+    "RESEARCH_REPORT_PROMPT",
 ]

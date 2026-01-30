@@ -20,6 +20,7 @@ from ..collectors import FundamentalsCollector, FundamentalsData, UniverseCollec
 from ..config import Settings
 from ..models import ResearchConfig, ScoringWeights
 from ..storage import (
+    CANDIDATE_STATUSES,
     CandidateScore,
     StockCandidate,
     get_candidate_by_ticker,
@@ -36,7 +37,6 @@ class DiscoveryResult:
     """Result of a discovery pipeline run."""
 
     total_candidates: int = 0
-    new_candidates: int = 0
     scored_candidates: int = 0
     top_candidates: list[str] = field(default_factory=list)
     watchlist_additions: list[str] = field(default_factory=list)
@@ -69,6 +69,14 @@ class DiscoveryPipeline:
     5. Identify top candidates - rank by composite score
     6. Auto-add to watchlist - promote high-scoring candidates
     """
+
+    # Maximum number of candidates to retrieve from database
+    MAX_DISCOVERED_CANDIDATES = 10000
+
+    # Status constants from CANDIDATE_STATUSES
+    STATUS_DISCOVERED = CANDIDATE_STATUSES[0]  # "discovered"
+    STATUS_SCREENING = CANDIDATE_STATUSES[1]  # "screening"
+    STATUS_WATCHLIST = CANDIDATE_STATUSES[3]  # "watchlist"
 
     def __init__(
         self,
@@ -190,7 +198,7 @@ class DiscoveryPipeline:
                 for ticker in result.top_candidates:
                     score = self._get_candidate_score(ticker)
                     if score and score >= watchlist_threshold:
-                        self._update_candidate_status(ticker, "watchlist")
+                        self._update_candidate_status(ticker, self.STATUS_WATCHLIST)
                         result.watchlist_additions.append(ticker)
                         logger.info(
                             f"Added {ticker} to watchlist (score: {score:.1f})"
@@ -225,7 +233,9 @@ class DiscoveryPipeline:
             List of ticker symbols for discovered candidates
         """
         # Get candidates with "discovered" status
-        candidates = get_candidates_by_status(self.session, "discovered", limit=10000)
+        candidates = get_candidates_by_status(
+            self.session, self.STATUS_DISCOVERED, limit=self.MAX_DISCOVERED_CANDIDATES
+        )
         return [c.ticker for c in candidates]
 
     def _apply_filters(self, tickers: list[str]) -> list[str]:
@@ -326,7 +336,7 @@ class DiscoveryPipeline:
         candidate = get_candidate_by_ticker(self.session, ticker)
         if candidate:
             candidate.composite_score = score.composite_score
-            candidate.status = "screening"
+            candidate.status = self.STATUS_SCREENING
             # Flush to make changes visible in subsequent queries
             self.session.flush()
 

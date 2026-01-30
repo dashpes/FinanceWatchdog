@@ -21,6 +21,7 @@ dependencies = [
     "pandas>=2.0.0",
     "loguru>=0.7.0",
     "httpx>=0.25.0",
+    "typer>=0.9.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,7 @@ dev = [
 
 [project.scripts]
 investment-monitor = "investment_monitor.cli:main"
+investment-research = "investment_monitor.research_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_monitor"]

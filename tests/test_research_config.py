@@ -509,3 +509,51 @@ universe:
 
             with pytest.raises(ValueError):
                 ResearchConfig.from_yaml(Path(f.name))
+
+    def test_from_yaml_example_config_loads(self):
+        """Test that the example config file can be loaded successfully."""
+        # Get the path to the example config file
+        project_root = Path(__file__).parent.parent
+        example_config_path = project_root / "config" / "research.yaml.example"
+
+        # Verify the file exists
+        assert example_config_path.exists(), f"Example config not found at {example_config_path}"
+
+        # Load the config - this should not raise any exceptions
+        config = ResearchConfig.from_yaml(example_config_path)
+
+        # Verify it loaded with the expected default values
+        assert config.scoring_weights.value == 0.2
+        assert config.scoring_weights.growth == 0.2
+        assert config.scoring_weights.quality == 0.2
+        assert config.scoring_weights.momentum == 0.2
+        assert config.scoring_weights.sentiment == 0.2
+
+        # Verify weights sum to 1.0
+        total_weight = (
+            config.scoring_weights.value
+            + config.scoring_weights.growth
+            + config.scoring_weights.quality
+            + config.scoring_weights.momentum
+            + config.scoring_weights.sentiment
+        )
+        assert total_weight == 1.0
+
+        # Verify universe settings match model defaults
+        assert config.universe.include_sp500 is True
+        assert config.universe.include_nasdaq100 is True
+        assert config.universe.etf_tickers == []
+        assert config.universe.min_market_cap == 1_000_000_000
+
+        # Verify thresholds match model defaults
+        assert config.thresholds.min_composite_score == 60.0
+        assert config.thresholds.auto_watchlist_score == 75.0
+        assert config.thresholds.auto_reject_score == 30.0
+
+        # Verify claude budget settings match model defaults
+        assert config.claude_budget.enabled is True
+        assert config.claude_budget.monthly_limit_usd == 50.0
+        assert config.claude_budget.max_reports_per_day == 10
+
+        # Verify discovery batch size matches model default
+        assert config.discovery_batch_size == 50
