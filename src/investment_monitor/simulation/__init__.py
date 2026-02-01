@@ -10,6 +10,7 @@ from .models import (
     SimulationConfig,
     SimulationOutput,
 )
+from .report_formatter import SimulationReportFormatter
 from .sensitivity import SensitivityAnalyzer
 
 __all__ = [
@@ -20,6 +21,8 @@ __all__ = [
     "CrisisScenario",
     # Simulation engine
     "SimulationEngine",
+    # Report formatting
+    "SimulationReportFormatter",
     # Sensitivity analysis
     "SensitivityAnalyzer",
     # Models
