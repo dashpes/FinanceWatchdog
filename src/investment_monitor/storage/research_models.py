@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -197,4 +198,39 @@ class CongressionalTrade(Base):
         Index("ix_congressional_trade_ticker", "ticker"),
         Index("ix_congressional_trade_politician", "politician"),
         Index("ix_congressional_trade_date", "trade_date"),
+    )
+
+
+class SimulationResult(Base):
+    """Stores Monte Carlo simulation results for a ticker."""
+
+    __tablename__ = "simulation_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False, index=True)
+    run_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    composite_score: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Parameters used
+    num_simulations: Mapped[int] = mapped_column(Integer, nullable=False)
+    lookback_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    volatility: Mapped[float] = mapped_column(Float, nullable=False)
+    drift: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Results stored as JSON blobs per horizon
+    results_30d: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    results_90d: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    results_252d: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    # Sensitivity analysis summary
+    sensitivity_analysis: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_simulation_result_ticker", "ticker"),
+        Index("ix_simulation_result_run_date", "run_date"),
     )
