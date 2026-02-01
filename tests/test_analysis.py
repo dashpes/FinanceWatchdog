@@ -493,6 +493,54 @@ class TestGenerate:
 # =============================================================================
 
 
+# =============================================================================
+# LocalLLM Weekly Synthesis Tests
+# =============================================================================
+
+
+class TestLocalLLMWeeklySynthesis:
+    """Tests for weekly synthesis generation."""
+
+    @pytest.mark.asyncio
+    async def test_generate_weekly_synthesis_unavailable(self):
+        """Test synthesis returns empty string when Ollama unavailable."""
+        from investment_monitor.analysis.local_llm import LocalLLM
+
+        llm = LocalLLM(base_url="http://localhost:99999")  # Invalid port
+
+        result = await llm.generate_weekly_synthesis(
+            alert_counts={"price": 5, "insider": 2},
+            top_movers=[("AAPL", -5.2), ("NVDA", 8.1)],
+            portfolio_change_pct=2.3,
+        )
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_generate_weekly_synthesis_returns_string(self):
+        """Test synthesis returns string when available."""
+        from unittest.mock import MagicMock, patch
+        from investment_monitor.analysis.local_llm import LocalLLM
+
+        llm = LocalLLM()
+
+        # Mock the client directly since generate_weekly_synthesis uses custom options
+        mock_client = MagicMock()
+        mock_client.generate.return_value = {"response": "Tech stocks showed mixed performance this week."}
+        llm._client = mock_client
+
+        with patch.object(llm, "is_available", return_value=True):
+            result = await llm.generate_weekly_synthesis(
+                alert_counts={"price": 5, "insider": 2},
+                top_movers=[("AAPL", -5.2), ("NVDA", 8.1)],
+                portfolio_change_pct=2.3,
+            )
+
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert result == "Tech stocks showed mixed performance this week."
+
+
 class TestLocalLLMIntegration:
     """Integration-style tests with fully mocked Ollama."""
 

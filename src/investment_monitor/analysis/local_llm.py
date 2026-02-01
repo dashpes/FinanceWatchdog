@@ -192,6 +192,53 @@ class LocalLLM:
 
         return response
 
+    async def generate_weekly_synthesis(
+        self,
+        alert_counts: dict[str, int],
+        top_movers: list[tuple[str, float]],
+        portfolio_change_pct: float | None = None,
+    ) -> str:
+        """Generate a weekly synthesis narrative.
+
+        Args:
+            alert_counts: Dict of alert_type -> count.
+            top_movers: List of (ticker, percent_change) tuples.
+            portfolio_change_pct: Portfolio change percentage.
+
+        Returns:
+            Synthesis text, or empty string if unavailable.
+        """
+        if not self.is_available():
+            return ""
+
+        # Format inputs for prompt
+        alert_str = ", ".join(f"{count} {atype}" for atype, count in alert_counts.items())
+        movers_str = ", ".join(f"{ticker} {change:+.1f}%" for ticker, change in top_movers[:5])
+        portfolio_str = f"{portfolio_change_pct:+.1f}%" if portfolio_change_pct is not None else "N/A"
+
+        from .prompts import LOCAL_LLM_WEEKLY_SYNTHESIS_PROMPT
+
+        prompt = LOCAL_LLM_WEEKLY_SYNTHESIS_PROMPT.format(
+            alert_counts=alert_str or "None",
+            top_movers=movers_str or "None",
+            portfolio_change=portfolio_str,
+        )
+
+        # Use longer response for synthesis
+        try:
+            response = self.client.generate(
+                model=self.model,
+                prompt=prompt,
+                options={
+                    "temperature": 0.3,
+                    "num_predict": 150,
+                },
+            )
+            return response.get("response", "").strip()
+        except Exception as e:
+            logger.debug(f"Weekly synthesis generation failed: {e}")
+            return ""
+
     @staticmethod
     def _parse_score(response: str) -> float | None:
         """Parse a relevance score from LLM response.
