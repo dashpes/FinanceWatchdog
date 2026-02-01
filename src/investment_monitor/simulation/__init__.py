@@ -1,5 +1,6 @@
 """Monte Carlo simulation module for risk analysis."""
 
+from .analyzer import MonteCarloAnalyzer
 from .crisis_loader import CrisisDataLoader, CrisisScenario
 from .engine import SimulationEngine
 from .models import (
@@ -12,6 +13,8 @@ from .models import (
 from .sensitivity import SensitivityAnalyzer
 
 __all__ = [
+    # Main analyzer (orchestrator)
+    "MonteCarloAnalyzer",
     # Crisis data loader
     "CrisisDataLoader",
     "CrisisScenario",
