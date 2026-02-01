@@ -1,5 +1,6 @@
 """Monte Carlo simulation module for risk analysis."""
 
+from .crisis_loader import CrisisDataLoader, CrisisScenario
 from .models import (
     HorizonResult,
     ScenarioResult,
@@ -9,6 +10,10 @@ from .models import (
 )
 
 __all__ = [
+    # Crisis data loader
+    "CrisisDataLoader",
+    "CrisisScenario",
+    # Models
     "HorizonResult",
     "ScenarioResult",
     "SensitivityResult",
