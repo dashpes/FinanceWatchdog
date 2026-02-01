@@ -76,6 +76,54 @@ investment-monitor --type weekly
 investment-monitor --dry-run
 ```
 
+## API Requirements & Estimated Costs
+
+### Required APIs (Free)
+
+| API/Service | Purpose | Auth Required | Rate Limits |
+|-------------|---------|---------------|-------------|
+| **Yahoo Finance (yfinance)** | Stock prices, earnings calendar, fundamentals | No | ~30 req/min |
+| **SEC EDGAR** | Insider transactions (Form 4 filings) | No | 10 req/sec |
+| **Congressional Trading** | Congressional stock disclosures | No | Public S3 data |
+| **RSS Feeds** | News aggregation (Yahoo Finance, Seeking Alpha) | No | ~30 req/min |
+
+### Optional APIs
+
+| API/Service | Purpose | Free Tier | Paid Pricing |
+|-------------|---------|-----------|--------------|
+| **Anthropic Claude** | Weekly AI synthesis & research reports | None | See below |
+| **Ollama (Local)** | News relevance scoring, sentiment analysis | Unlimited (self-hosted) | Free |
+| **SendGrid** | Email notifications | 100 emails/day | $19.95/mo for 50K emails |
+| **Slack Webhooks** | Slack notifications | Unlimited | Free |
+| **Finnhub** | Financial data (configured but unused) | 60 req/min | Varies |
+
+### Claude API Pricing (Anthropic)
+
+The weekly synthesis feature uses Claude Sonnet. Current pricing (2026):
+
+| Model | Input (per M tokens) | Output (per M tokens) |
+|-------|---------------------|----------------------|
+| Claude Haiku 4.5 | $1.00 | $5.00 |
+| **Claude Sonnet 4.5** | $3.00 | $15.00 |
+| Claude Opus 4.5 | $5.00 | $25.00 |
+
+**Estimated monthly cost**: $1-5/month for typical usage (1-2 weekly syntheses). The codebase includes a configurable monthly spending limit (default: $5.00).
+
+### Cost Optimization Tips
+
+1. **Use Ollama for local AI** - Free news scoring and sentiment analysis
+2. **Batch API requests** - 50% discount on Claude API for async processing
+3. **Prompt caching** - 90% savings on repeated context with Claude
+4. **Console notifications only** - Skip SendGrid/Slack for zero notification costs
+
+### Total Estimated Monthly Costs
+
+| Usage Level | Description | Est. Cost |
+|-------------|-------------|-----------|
+| **Free** | yfinance + SEC + console logging + Ollama | $0/mo |
+| **Basic AI** | Free + Claude weekly synthesis | $1-5/mo |
+| **Full Featured** | Basic AI + SendGrid email notifications | $20-25/mo |
+
 ## Configuration
 
 ### Environment Variables

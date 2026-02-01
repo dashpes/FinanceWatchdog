@@ -9,6 +9,7 @@ from .models import (
     SimulationConfig,
     SimulationOutput,
 )
+from .sensitivity import SensitivityAnalyzer
 
 __all__ = [
     # Crisis data loader
@@ -16,6 +17,8 @@ __all__ = [
     "CrisisScenario",
     # Simulation engine
     "SimulationEngine",
+    # Sensitivity analysis
+    "SensitivityAnalyzer",
     # Models
     "HorizonResult",
     "ScenarioResult",
