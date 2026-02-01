@@ -57,6 +57,7 @@ from investment_monitor.models import AlertsConfig, Portfolio
 from investment_monitor.notifications import (
     AlertMessage,
     ConsoleChannel,
+    DiscordChannel,
     NotificationManager,
     Priority,
     format_daily_digest,
@@ -171,7 +172,18 @@ async def run_monitor(
         return summary
 
     # Create notification manager with console channel (always available)
-    notification_manager = NotificationManager([ConsoleChannel()])
+    channels: list[ConsoleChannel | DiscordChannel] = [ConsoleChannel()]
+
+    # Add Discord channel if configured
+    if settings.discord_webhook_url:
+        try:
+            discord_channel = DiscordChannel(settings.discord_webhook_url)
+            channels.append(discord_channel)
+            logger.info("Discord notifications enabled")
+        except ValueError as e:
+            logger.warning("Discord channel not configured: {error}", error=str(e))
+
+    notification_manager = NotificationManager(channels)
 
     with get_session() as session:
         try:
@@ -458,8 +470,15 @@ async def _send_daily_digest(
     plain_text, html = format_daily_digest(messages, portfolio, date.today())
     logger.debug(f"Daily digest:\n{plain_text}")
 
-    # Send via notification manager
-    await notification_manager.send_daily_digest(messages)
+    # Send via each channel with appropriate parameters
+    for channel in notification_manager.channels:
+        try:
+            if isinstance(channel, DiscordChannel):
+                await channel.send_digest(messages, portfolio=portfolio, is_weekly=False)
+            else:
+                await channel.send_digest(messages)
+        except Exception as e:
+            logger.error(f"Failed to send daily digest via {channel.name}: {e}")
 
 
 async def _send_weekly_digest(
@@ -531,9 +550,22 @@ async def _send_weekly_digest(
     )
     logger.info(f"Weekly digest:\n{plain_text}")
 
-    # For now, just log the digest - in production this would send via email/Slack
+    # Send via each channel with appropriate parameters
     if messages or ai_synthesis:
         logger.info(f"Weekly digest contains {len(messages)} alerts")
+        for channel in notification_manager.channels:
+            try:
+                if isinstance(channel, DiscordChannel):
+                    await channel.send_digest(
+                        messages,
+                        portfolio=portfolio,
+                        is_weekly=True,
+                        ai_synthesis=ai_synthesis,
+                    )
+                else:
+                    await channel.send_digest(messages)
+            except Exception as e:
+                logger.error(f"Failed to send weekly digest via {channel.name}: {e}")
     else:
         logger.info("No content for weekly digest")
 
