@@ -1,7 +1,7 @@
 """Notification system for investment alerts.
 
 This module provides the infrastructure for sending alert notifications
-through various channels (console, Slack, email, etc.).
+through various channels (console, Discord, Slack, email, etc.).
 
 Priority levels:
     HIGH: Send immediately via all channels
@@ -12,12 +12,16 @@ Example usage:
     from investment_monitor.notifications import (
         AlertMessage,
         ConsoleChannel,
+        DiscordChannel,
         NotificationManager,
         Priority,
     )
 
-    # Create a manager with console output
-    manager = NotificationManager([ConsoleChannel()])
+    # Create a manager with Discord output
+    manager = NotificationManager([
+        ConsoleChannel(),
+        DiscordChannel("https://discord.com/api/webhooks/xxx/yyy"),
+    ])
 
     # Send a high-priority alert
     await manager.notify(AlertMessage(
@@ -27,30 +31,22 @@ Example usage:
         alert_type="price",
         priority=Priority.HIGH,
     ))
-
-    # Queue medium-priority alerts
-    await manager.notify(AlertMessage(
-        title="Volume spike detected",
-        body="Trading volume 3x normal.",
-        ticker="MSFT",
-        alert_type="volume",
-        priority=Priority.MEDIUM,
-    ))
-
-    # Send the daily digest
-    await manager.send_daily_digest()
 """
 
 from .base import AlertMessage, NotificationChannel, Priority
 from .console import ConsoleChannel
 from .digest import format_daily_digest, format_weekly_digest
+from .discord import DiscordChannel
 from .manager import NotificationManager
+from .pdf_report import PDFReportGenerator
 
 __all__ = [
     "AlertMessage",
     "ConsoleChannel",
+    "DiscordChannel",
     "NotificationChannel",
     "NotificationManager",
+    "PDFReportGenerator",
     "Priority",
     "format_daily_digest",
     "format_weekly_digest",
