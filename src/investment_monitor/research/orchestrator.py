@@ -11,7 +11,7 @@ complete research pipeline:
 7. Optionally run Monte Carlo simulation for high-scoring candidates
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import time
 
 from loguru import logger
