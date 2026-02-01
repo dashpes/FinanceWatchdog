@@ -8,9 +8,10 @@ complete research pipeline:
 4. Fetch congressional trades (CongressTradesCollector)
 5. Generate deep report (ResearchReportGenerator using Claude)
 6. Save report and update candidate status to "researched"
+7. Optionally run Monte Carlo simulation for high-scoring candidates
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 
 from loguru import logger
@@ -25,6 +26,8 @@ from ..collectors import (
 )
 from ..config import Settings
 from ..models import ResearchConfig
+from ..simulation.analyzer import MonteCarloAnalyzer
+from ..simulation.models import SimulationOutput
 from ..storage import (
     CANDIDATE_STATUSES,
     CandidateScore,
@@ -37,8 +40,13 @@ from ..storage import (
     get_trades_for_ticker,
     save_candidate,
     save_report,
+    save_simulation_result,
 )
 from .queue import ResearchQueue
+
+
+# Threshold score for triggering Monte Carlo simulation
+SIMULATION_SCORE_THRESHOLD = 80.0
 
 
 @dataclass
@@ -51,6 +59,7 @@ class ResearchResult:
         report: The generated ResearchReport, or None if failed
         error: Error message if research failed, or None if successful
         duration: Time taken to complete the research in seconds
+        simulation_output: Monte Carlo simulation results, or None if not run
     """
 
     ticker: str
@@ -58,6 +67,7 @@ class ResearchResult:
     report: ResearchReport | None
     error: str | None
     duration: float
+    simulation_output: SimulationOutput | None = None
 
 
 class ResearchOrchestrator:
@@ -117,7 +127,9 @@ class ResearchOrchestrator:
         # Initialize research queue
         self._queue = ResearchQueue(session)
 
-    async def research_ticker(self, ticker: str) -> ResearchResult:
+    async def research_ticker(
+        self, ticker: str, run_simulation: bool = False
+    ) -> ResearchResult:
         """Perform full research for a single ticker.
 
         This executes the complete research flow:
@@ -127,9 +139,12 @@ class ResearchOrchestrator:
         4. Fetch congressional trades using CongressTradesCollector
         5. Generate deep report using ResearchReportGenerator (Claude)
         6. Save report and update candidate status to "researched"
+        7. Optionally run Monte Carlo simulation for high-scoring candidates
 
         Args:
             ticker: Stock ticker symbol to research
+            run_simulation: Whether to run Monte Carlo simulation for high-scoring
+                candidates (score >= 80). Defaults to False.
 
         Returns:
             ResearchResult with the research outcome
@@ -205,6 +220,19 @@ class ResearchOrchestrator:
                 self.session.flush()
                 logger.info(f"Research completed for {ticker}: {report.recommendation}")
 
+            # Step 9: Run Monte Carlo simulation if enabled and score is high enough
+            simulation_output = None
+            composite_score = score.composite_score if score else self.DEFAULT_COMPOSITE_SCORE
+            if self._should_run_simulation(composite_score, run_simulation):
+                # Get entry price from fundamentals
+                entry_price = getattr(fundamentals, "current_price", None) or 100.0
+                simulation_output = await self._run_simulation(
+                    ticker, entry_price, composite_score
+                )
+                if simulation_output:
+                    save_simulation_result(self.session, simulation_output)
+                    logger.info(f"Simulation completed for {ticker}")
+
             duration = time.time() - start_time
             return ResearchResult(
                 ticker=ticker,
@@ -212,6 +240,7 @@ class ResearchOrchestrator:
                 report=report,
                 error=None,
                 duration=duration,
+                simulation_output=simulation_output,
             )
 
         except Exception as e:
@@ -430,3 +459,53 @@ class ResearchOrchestrator:
             score_result=score,
             congress_summary=congress_summary,
         )
+
+    def _should_run_simulation(
+        self, composite_score: float, run_simulation_flag: bool
+    ) -> bool:
+        """Check if Monte Carlo simulation should be run.
+
+        Simulation is only run when:
+        1. run_simulation_flag is True (explicitly requested)
+        2. composite_score >= SIMULATION_SCORE_THRESHOLD (80.0)
+
+        Args:
+            composite_score: The candidate's composite score (0-100)
+            run_simulation_flag: Whether simulation was requested
+
+        Returns:
+            True if simulation should be run, False otherwise
+        """
+        if not run_simulation_flag:
+            return False
+        return composite_score >= SIMULATION_SCORE_THRESHOLD
+
+    async def _run_simulation(
+        self, ticker: str, entry_price: float, composite_score: float
+    ) -> SimulationOutput | None:
+        """Run Monte Carlo simulation for a ticker.
+
+        Creates a MonteCarloAnalyzer and runs the analysis. If the simulation
+        fails for any reason, returns None instead of raising an exception.
+
+        Args:
+            ticker: Stock ticker symbol
+            entry_price: Current/entry price for the stock
+            composite_score: The candidate's composite score
+
+        Returns:
+            SimulationOutput with analysis results, or None if simulation failed
+        """
+        logger.info(f"Running Monte Carlo simulation for {ticker}")
+        try:
+            analyzer = MonteCarloAnalyzer()
+            output = analyzer.analyze(
+                ticker=ticker,
+                entry_price=entry_price,
+                composite_score=composite_score,
+                force=True,  # Bypass internal threshold since we already checked
+            )
+            return output
+        except Exception as e:
+            logger.warning(f"Monte Carlo simulation failed for {ticker}: {e}")
+            return None
