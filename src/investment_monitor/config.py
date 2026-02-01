@@ -8,6 +8,41 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class MonteCarloSettings(BaseModel):
+    """Monte Carlo simulation settings."""
+
+    score_threshold: float = 80.0
+    horizons: list[int] = Field(default_factory=lambda: [30, 90, 252])
+    min_paths: int = 1000
+    max_paths: int = 50000
+    ci_width_threshold: float = 0.15
+    min_lookback_days: int = 252
+    max_lookback_days: int = 1260
+    volatility_multipliers: list[float] = Field(
+        default_factory=lambda: [0.5, 0.8, 1.0, 1.2, 1.5]
+    )
+    drift_scenarios: list[str] = Field(
+        default_factory=lambda: ["pessimistic", "neutral", "optimistic"]
+    )
+    include_in_reports: bool = True
+    disclaimer: str = "Simulation based on historical returns. Not a prediction."
+
+    # Scenario toggles
+    scenarios: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "base_gbm": True,
+            "crisis_2008": True,
+            "dotcom_crash": True,
+            "covid_crash": True,
+            "stagflation_1970s": True,
+            "black_monday_1987": True,
+            "rising_rates_2022": True,
+            "regime_democrat": True,
+            "regime_republican": True,
+        }
+    )
+
+
 class Settings(BaseSettings):
     """Main application settings loaded from environment."""
 

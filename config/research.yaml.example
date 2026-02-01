@@ -96,3 +96,29 @@ claude_budget:
 # Higher values = faster discovery but more memory usage
 # Range: 1-500
 discovery_batch_size: 50
+
+# ==============================================================================
+# Monte Carlo Simulation Settings
+# ==============================================================================
+# Settings for probabilistic risk analysis of stock candidates.
+monte_carlo:
+  score_threshold: 80
+  horizons: [30, 90, 252]
+  min_paths: 1000
+  max_paths: 50000
+  ci_width_threshold: 0.15
+  min_lookback_days: 252
+  max_lookback_days: 1260
+  include_in_reports: true
+  disclaimer: "Simulation based on historical returns. Not a prediction."
+
+  scenarios:
+    base_gbm: true
+    crisis_2008: true
+    dotcom_crash: true
+    covid_crash: true
+    stagflation_1970s: true
+    black_monday_1987: true
+    rising_rates_2022: true
+    regime_democrat: true
+    regime_republican: true
