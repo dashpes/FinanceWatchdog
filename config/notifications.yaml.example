@@ -1,13 +1,24 @@
-channels:
-  console:
-    enabled: true
+# Notification channel configuration
+# Copy this to notifications.yaml and customize
 
-  slack:
-    enabled: false
-    webhook_url: ""
+discord:
+  # Enable/disable Discord notifications
+  enabled: true
 
-  email:
-    enabled: false
-    provider: "sendgrid"
-    from_address: ""
-    to_address: ""
+  # What to show in daily embed summary
+  daily_embed:
+    show_high_priority_alerts: true
+    show_portfolio_change: true
+    max_alerts_in_embed: 5
+
+  # What to show in weekly embed summary
+  weekly_embed:
+    show_ai_synthesis: true
+
+# Console output (always available)
+console:
+  enabled: true
+  # Log level for different priorities
+  high_priority_level: error
+  medium_priority_level: warning
+  low_priority_level: debug
