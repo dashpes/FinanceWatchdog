@@ -38,16 +38,19 @@ from .research_models import (
     PerformanceTracker,
     ResearchProfile,
     ResearchReport,
+    SimulationResult,
     StockCandidate,
 )
 from .research_operations import (
     get_candidate_by_ticker,
     get_candidates_by_status,
+    get_high_scoring_candidates,
     get_latest_report,
     get_latest_score,
     get_or_create_default_profile,
     get_records_needing_update,
     get_score_history,
+    get_simulation_results,
     get_top_candidates,
     get_trades_for_ticker,
     save_candidate,
@@ -56,6 +59,7 @@ from .research_operations import (
     save_profile,
     save_report,
     save_score,
+    save_simulation_result,
 )
 
 __all__ = [
@@ -98,6 +102,7 @@ __all__ = [
     "ResearchReport",
     "PerformanceTracker",
     "CongressionalTrade",
+    "SimulationResult",
     # Research operations - Profile
     "get_or_create_default_profile",
     "save_profile",
@@ -119,4 +124,8 @@ __all__ = [
     # Research operations - Congressional Trade
     "save_congressional_trade",
     "get_trades_for_ticker",
+    # Research operations - Simulation
+    "save_simulation_result",
+    "get_simulation_results",
+    "get_high_scoring_candidates",
 ]
