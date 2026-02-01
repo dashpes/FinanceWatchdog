@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     finnhub_api_key: str = ""
 
+    # Discord
+    discord_webhook_url: str = ""
+
     # Ollama
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"
