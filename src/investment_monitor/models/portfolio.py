@@ -14,6 +14,7 @@ class Holding(BaseModel):
     shares: Decimal = Field(..., gt=0)
     cost_basis: Decimal = Field(..., gt=0)
     thesis: str = Field(default="", max_length=500)
+    account: str = Field(default="", max_length=50)
 
     @computed_field
     @property
