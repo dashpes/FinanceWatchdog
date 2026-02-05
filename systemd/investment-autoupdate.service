@@ -1,0 +1,15 @@
+[Unit]
+Description=Investment Monitor Auto-Update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/FinanceWatchdog
+ExecStart=/root/FinanceWatchdog/scripts/auto_update.sh --restart
+StandardOutput=append:/root/FinanceWatchdog/logs/auto_update.log
+StandardError=append:/root/FinanceWatchdog/logs/auto_update.log
+
+[Install]
+WantedBy=multi-user.target
