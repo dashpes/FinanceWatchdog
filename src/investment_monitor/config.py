@@ -58,8 +58,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     finnhub_api_key: str = ""
 
-    # Discord
+    # Discord - supports separate channels for daily vs weekly
+    # If only discord_webhook_url is set, it's used for both
+    # If daily/weekly specific URLs are set, they take precedence
     discord_webhook_url: str = ""
+    discord_daily_webhook_url: str = ""
+    discord_weekly_webhook_url: str = ""
 
     # Ollama
     ollama_host: str = "http://localhost:11434"

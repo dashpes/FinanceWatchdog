@@ -171,17 +171,39 @@ async def run_monitor(
         summary.finished_at = datetime.now()
         return summary
 
-    # Create notification manager with console channel (always available)
-    channels: list[ConsoleChannel | DiscordChannel] = [ConsoleChannel()]
+    # Create notification channels
+    console_channel = ConsoleChannel()
 
-    # Add Discord channel if configured
-    if settings.discord_webhook_url:
+    # Set up Discord channels - supports separate daily/weekly webhooks
+    # Priority: specific URL > fallback URL > None
+    daily_discord_url = settings.discord_daily_webhook_url or settings.discord_webhook_url
+    weekly_discord_url = settings.discord_weekly_webhook_url or settings.discord_webhook_url
+
+    discord_daily: DiscordChannel | None = None
+    discord_weekly: DiscordChannel | None = None
+
+    if daily_discord_url:
         try:
-            discord_channel = DiscordChannel(settings.discord_webhook_url)
-            channels.append(discord_channel)
-            logger.info("Discord notifications enabled")
+            discord_daily = DiscordChannel(daily_discord_url)
+            logger.info("Discord daily notifications enabled")
         except ValueError as e:
-            logger.warning("Discord channel not configured: {error}", error=str(e))
+            logger.warning("Discord daily channel not configured: {error}", error=str(e))
+
+    if weekly_discord_url:
+        try:
+            # Reuse daily channel if URLs are the same
+            if weekly_discord_url == daily_discord_url and discord_daily:
+                discord_weekly = discord_daily
+            else:
+                discord_weekly = DiscordChannel(weekly_discord_url)
+            logger.info("Discord weekly notifications enabled")
+        except ValueError as e:
+            logger.warning("Discord weekly channel not configured: {error}", error=str(e))
+
+    # Build channel list for regular notifications (immediate alerts use daily channel)
+    channels: list[ConsoleChannel | DiscordChannel] = [console_channel]
+    if discord_daily:
+        channels.append(discord_daily)
 
     notification_manager = NotificationManager(channels)
 
@@ -215,10 +237,10 @@ async def run_monitor(
                 summary.alerts_sent = sent_count
 
             if run_type == "digest":
-                await _send_daily_digest(session, portfolio, notification_manager)
+                await _send_daily_digest(session, portfolio, console_channel, discord_daily)
 
             if run_type == "weekly":
-                await _send_weekly_digest(session, portfolio, alerts_config, settings, notification_manager)
+                await _send_weekly_digest(session, portfolio, alerts_config, settings, console_channel, discord_weekly)
 
         except Exception as e:
             error_msg = f"Monitor run failed: {e}"
@@ -430,7 +452,8 @@ async def _send_immediate_alerts(
 async def _send_daily_digest(
     session: Session,
     portfolio: Portfolio,
-    notification_manager: NotificationManager,
+    console_channel: ConsoleChannel,
+    discord_channel: DiscordChannel | None,
 ) -> None:
     """Compile and send daily digest.
 
@@ -440,7 +463,8 @@ async def _send_daily_digest(
     Args:
         session: Database session
         portfolio: Portfolio for context
-        notification_manager: Notification manager
+        console_channel: Console channel for logging
+        discord_channel: Discord channel for daily notifications (optional)
     """
     # Get alerts from the last 24 hours
     recent_alerts = get_recent_alerts(session, hours=24)
@@ -470,15 +494,18 @@ async def _send_daily_digest(
     plain_text, html = format_daily_digest(messages, portfolio, date.today())
     logger.debug(f"Daily digest:\n{plain_text}")
 
-    # Send via each channel with appropriate parameters
-    for channel in notification_manager.channels:
+    # Send to console
+    try:
+        await console_channel.send_digest(messages)
+    except Exception as e:
+        logger.error(f"Failed to send daily digest via console: {e}")
+
+    # Send to Discord if configured
+    if discord_channel:
         try:
-            if isinstance(channel, DiscordChannel):
-                await channel.send_digest(messages, portfolio=portfolio, is_weekly=False)
-            else:
-                await channel.send_digest(messages)
+            await discord_channel.send_digest(messages, portfolio=portfolio, is_weekly=False)
         except Exception as e:
-            logger.error(f"Failed to send daily digest via {channel.name}: {e}")
+            logger.error(f"Failed to send daily digest via Discord: {e}")
 
 
 async def _send_weekly_digest(
@@ -486,7 +513,8 @@ async def _send_weekly_digest(
     portfolio: Portfolio,
     alerts_config: AlertsConfig,
     settings: Settings,
-    notification_manager: NotificationManager,
+    console_channel: ConsoleChannel,
+    discord_channel: DiscordChannel | None,
 ) -> None:
     """Compile and send weekly digest with optional AI synthesis.
 
@@ -495,7 +523,8 @@ async def _send_weekly_digest(
         portfolio: Portfolio for context
         alerts_config: Alerts configuration
         settings: Application settings
-        notification_manager: Notification manager
+        console_channel: Console channel for logging
+        discord_channel: Discord channel for weekly notifications (optional)
     """
     week_end = date.today()
     week_start = week_end - timedelta(days=6)
@@ -550,22 +579,27 @@ async def _send_weekly_digest(
     )
     logger.info(f"Weekly digest:\n{plain_text}")
 
-    # Send via each channel with appropriate parameters
+    # Send via each channel
     if messages or ai_synthesis:
         logger.info(f"Weekly digest contains {len(messages)} alerts")
-        for channel in notification_manager.channels:
+
+        # Send to console
+        try:
+            await console_channel.send_digest(messages)
+        except Exception as e:
+            logger.error(f"Failed to send weekly digest via console: {e}")
+
+        # Send to Discord if configured
+        if discord_channel:
             try:
-                if isinstance(channel, DiscordChannel):
-                    await channel.send_digest(
-                        messages,
-                        portfolio=portfolio,
-                        is_weekly=True,
-                        ai_synthesis=ai_synthesis,
-                    )
-                else:
-                    await channel.send_digest(messages)
+                await discord_channel.send_digest(
+                    messages,
+                    portfolio=portfolio,
+                    is_weekly=True,
+                    ai_synthesis=ai_synthesis,
+                )
             except Exception as e:
-                logger.error(f"Failed to send weekly digest via {channel.name}: {e}")
+                logger.error(f"Failed to send weekly digest via Discord: {e}")
     else:
         logger.info("No content for weekly digest")
 
