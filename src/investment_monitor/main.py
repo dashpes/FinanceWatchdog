@@ -490,10 +490,6 @@ async def _send_daily_digest(
         except Exception as e:
             logger.warning(f"Failed to convert alert record: {e}")
 
-    if not messages:
-        logger.info("No alerts for daily digest")
-        return
-
     logger.info(f"Sending daily digest with {len(messages)} alerts")
 
     # Format and log the digest
