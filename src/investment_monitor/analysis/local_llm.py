@@ -58,8 +58,23 @@ class LocalLLM:
             import ollama
             client = ollama.Client(host=self.base_url)
             # List models to check if server is running
-            models = client.list()
-            model_names = [m.get("name", "") for m in models.get("models", [])]
+            response = client.list()
+
+            # Handle both old dict-based API and new object-based API
+            model_names: list[str] = []
+            if hasattr(response, "models"):
+                # New API: response.models is a list of Model objects
+                for m in response.models:
+                    # Model object has 'model' attribute (e.g., "phi3:mini")
+                    name = getattr(m, "model", None) or getattr(m, "name", "")
+                    if name:
+                        model_names.append(name)
+            elif isinstance(response, dict):
+                # Old API: response is a dict with "models" key
+                for m in response.get("models", []):
+                    name = m.get("name", "") or m.get("model", "")
+                    if name:
+                        model_names.append(name)
 
             # Check if our model is available (handle both full and short names)
             # e.g., "phi3:mini" should match "phi3:mini" or "phi3:latest"

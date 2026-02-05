@@ -230,6 +230,12 @@ async def run_monitor(
                 for alert in alerts:
                     alert.priority = classify_priority(alert, alerts_config)
 
+                # Save ALL alerts to database for digest (not just sent ones)
+                for alert in alerts:
+                    if alert.priority != Priority.HIGH:
+                        # Save non-HIGH alerts as "queued" for digest
+                        deduplicator.mark_sent(alert, "queued")
+
                 # Send immediate alerts (HIGH priority)
                 sent_count = await _send_immediate_alerts(
                     alerts, session, deduplicator, notification_manager
