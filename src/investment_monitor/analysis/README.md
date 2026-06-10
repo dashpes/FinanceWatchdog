@@ -1,16 +1,39 @@
 # Analysis Module
 
-AI-powered analysis using local LLM (Ollama) and Claude API.
+AI-powered analysis that runs **completely free on local Ollama by default**,
+for both tiers (news scoring *and* weekly synthesis / research reports). Claude
+is an optional, opt-in provider for higher-quality tier-2 output.
 
 ## Overview
 
 ```
 analysis/
+├── hardware.py        # Cross-platform RAM detection + recommend_models()
+├── ollama_client.py   # Object-based Ollama response helpers (single source)
 ├── prompts.py         # Prompt templates
-├── local_llm.py       # LocalLLM - Ollama client
+├── local_llm.py       # LocalLLM - Ollama client (scoring, sentiment, synthesis)
 ├── news_processor.py  # NewsProcessor - relevance scoring
-└── claude_api.py      # ClaudeAnalyzer - weekly synthesis
+├── research_scorer.py # ResearchScorer - multi-factor stock scoring (Ollama)
+├── research_report.py # ResearchReportGenerator - reports (Ollama or Claude)
+└── claude_api.py      # ClaudeAnalyzer - optional weekly synthesis via Claude
 ```
+
+### Provider & model selection
+
+- **Tier-1 (fast):** news relevance, sentiment, factor scoring — always local.
+- **Tier-2 (heavy):** weekly synthesis, research reports — local by default;
+  Claude when `LLM_PROVIDER=anthropic`, or `auto` with an `ANTHROPIC_API_KEY`.
+- **Model agnostic:** `OLLAMA_MODEL` / `OLLAMA_SYNTHESIS_MODEL` default to `auto`,
+  which picks models by detected RAM (`hardware.recommend_models`). Pin an
+  explicit tag to override. Run `investment-monitor --doctor` to see the
+  detected RAM, chosen models, and live Ollama status.
+
+### Modern Ollama API
+
+This module targets the object-based Ollama Python API (>= 0.4): `client.list()`
+returns a `ListResponse` (`.models[i].model`) and `client.generate()` returns a
+`GenerateResponse` (`.response`). All response parsing goes through
+`ollama_client.py` so there is exactly one place that knows the response shape.
 
 ## Local LLM (Ollama)
 
@@ -316,13 +339,15 @@ async def extract_entities(self, text: str) -> list[str]:
 
     List only company names, one per line:"""
 
-    response = self._client.generate(
+    response = self.client.generate(
         model=self.model,
         prompt=prompt,
         options={"temperature": 0.1}
     )
 
-    return [line.strip() for line in response["response"].split("\n") if line.strip()]
+    # Object-based API: read .response (helpers in ollama_client.py).
+    from .ollama_client import response_text
+    return [line.strip() for line in response_text(response).split("\n") if line.strip()]
 ```
 
 ### Add Alternative LLM Provider

@@ -74,6 +74,9 @@ investment-monitor --type weekly
 
 # Dry run (show what would happen)
 investment-monitor --dry-run
+
+# Diagnose AI setup: detected RAM, chosen models, and Ollama status
+investment-monitor --doctor
 ```
 
 ## API Requirements & Estimated Costs

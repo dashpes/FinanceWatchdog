@@ -21,6 +21,9 @@ Usage:
     # Show version
     investment-monitor --version
 
+    # Diagnose AI/LLM setup (detected RAM, chosen models, Ollama status)
+    investment-monitor --doctor
+
     # Dry run (show what would be done without actually doing it)
     investment-monitor --dry-run
 """
@@ -104,6 +107,13 @@ Cron examples:
     )
 
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Print AI/LLM + hardware diagnostics (detected RAM, chosen models, "
+        "Ollama status) and exit",
+    )
+
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -127,6 +137,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle quiet mode
     log_level = "ERROR" if args.quiet else args.log_level
+
+    # Handle diagnostics
+    if args.doctor:
+        from investment_monitor.diagnostics import build_doctor_report
+
+        print(build_doctor_report())
+        return 0
 
     # Handle dry run
     if args.dry_run:

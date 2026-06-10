@@ -35,12 +35,37 @@ def model_names(list_response: Any) -> list[str]:
     return names
 
 
-def has_model(list_response: Any, wanted: str) -> bool:
-    """Return True if ``wanted`` is present among the available models.
+def model_matches(names: list[str], wanted: str) -> bool:
+    """Return True if ``wanted`` is satisfied by any tag in ``names``.
 
-    Matches either the exact tag (``"phi3:mini"``) or any tag sharing the same
-    base name (``"phi3:mini"`` also satisfies a request for ``"phi3"``), so a
-    pinned ``:latest`` or differing tag still counts as available.
+    Matching rules (tag-aware, so different sizes of the same family do NOT
+    match each other - ``qwen2.5:7b`` does not satisfy ``qwen2.5:32b``):
+
+    - exact tag match (``"qwen2.5:7b"`` == ``"qwen2.5:7b"``);
+    - if the caller did not pin a tag (``"qwen2.5"``), any tag of that base name;
+    - if the caller asked for ``":latest"``, a bare install of that base name.
+
+    Args:
+        names: Installed model tags (e.g. from :func:`model_names`).
+        wanted: The model the caller wants to use.
+
+    Returns:
+        True if a matching model is present.
+    """
+    if wanted in names:
+        return True
+    if ":" not in wanted:
+        # No tag pinned: any size/tag of this base name counts.
+        return any(name.split(":")[0] == wanted for name in names)
+    base, tag = wanted.split(":", 1)
+    if tag == "latest":
+        # "name:latest" is satisfied by a bare "name" install.
+        return base in names
+    return False
+
+
+def has_model(list_response: Any, wanted: str) -> bool:
+    """Return True if ``wanted`` is present among a ``client.list()`` response.
 
     Args:
         list_response: The ``ListResponse`` returned by ``client.list()``.
@@ -49,11 +74,7 @@ def has_model(list_response: Any, wanted: str) -> bool:
     Returns:
         True if a matching model is installed.
     """
-    base = wanted.split(":")[0]
-    for name in model_names(list_response):
-        if name == wanted or name.startswith(base):
-            return True
-    return False
+    return model_matches(model_names(list_response), wanted)
 
 
 def response_text(generate_response: Any) -> str:
