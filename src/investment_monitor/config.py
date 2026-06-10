@@ -65,9 +65,19 @@ class Settings(BaseSettings):
     discord_daily_webhook_url: str = ""
     discord_weekly_webhook_url: str = ""
 
-    # Ollama
+    # Ollama (local LLM)
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "phi3:mini"
+    # Model names may be set to "auto" to let the system pick a model that fits
+    # the host's RAM (see analysis.hardware.recommend_models). Set an explicit
+    # tag (e.g. "qwen2.5:7b") to override.
+    ollama_model: str = "auto"  # fast/tier-1 model: news relevance, sentiment, scoring
+    ollama_synthesis_model: str = "auto"  # tier-2 model: weekly synthesis, research reports
+
+    # Which provider handles tier-2 synthesis/reports:
+    #   "auto"      -> use Claude when an Anthropic API key is set, else local Ollama
+    #   "ollama"    -> always local (completely free, no API key needed)
+    #   "anthropic" -> always Claude (requires anthropic_api_key)
+    llm_provider: str = "auto"
 
     # Paths
     config_dir: Path = Path("config")
@@ -76,6 +86,36 @@ class Settings(BaseSettings):
 
     # Database
     db_path: Path = Path("data/portfolio.db")
+
+    def resolved_ollama_model(self) -> str:
+        """Return the tier-1 (fast) Ollama model, resolving "auto" by RAM."""
+        if self.ollama_model and self.ollama_model.lower() != "auto":
+            return self.ollama_model
+        from .analysis.hardware import recommend_models
+
+        return recommend_models().fast
+
+    def resolved_synthesis_model(self) -> str:
+        """Return the tier-2 (synthesis) Ollama model, resolving "auto" by RAM."""
+        if self.ollama_synthesis_model and self.ollama_synthesis_model.lower() != "auto":
+            return self.ollama_synthesis_model
+        from .analysis.hardware import recommend_models
+
+        return recommend_models().synthesis
+
+    def prefer_anthropic_synthesis(self) -> bool:
+        """Whether tier-2 synthesis/reports should use Claude instead of Ollama.
+
+        Honors ``llm_provider``: "anthropic" forces Claude, "ollama" forces local,
+        and "auto" uses Claude only when an Anthropic API key is configured.
+        Local Ollama is the free default whenever Claude is not selected.
+        """
+        provider = (self.llm_provider or "auto").lower()
+        if provider == "ollama":
+            return False
+        if provider == "anthropic":
+            return True
+        return bool(self.anthropic_api_key)
 
 
 def load_yaml_config(config_dir: Path, filename: str) -> dict[str, Any]:

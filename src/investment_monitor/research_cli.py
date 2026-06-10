@@ -105,7 +105,7 @@ def discover(
                 session=session,
                 config=settings,
                 research_config=research_config,
-                ollama_model=settings.ollama_model,
+                ollama_model=settings.resolved_ollama_model(),
             )
 
             if dry_run:

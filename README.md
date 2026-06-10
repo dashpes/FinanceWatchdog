@@ -10,7 +10,7 @@ A personal investment monitoring system that tracks your portfolio, collects mar
 - **News Aggregation**: Collect news from RSS feeds, filter by relevance
 - **Earnings Calendar**: Get notified before earnings announcements
 - **ETF Holdings**: Track changes in ETF compositions
-- **AI Analysis**: Local LLM for news relevance scoring, Claude API for weekly synthesis
+- **AI Analysis**: Local LLM (Ollama) for everything by default — news relevance scoring *and* weekly synthesis / research reports — so it runs **completely free**. Model selection is auto-detected from your machine's RAM (or pin your own). Claude API is an optional, opt-in upgrade for higher-quality synthesis.
 - **Flexible Notifications**: Console logging (Slack/email ready to add)
 
 ## Quick Start
@@ -69,7 +69,7 @@ investment-monitor --type regular
 # Daily digest
 investment-monitor --type digest
 
-# Weekly AI synthesis (requires ANTHROPIC_API_KEY)
+# Weekly AI synthesis (free via local Ollama; uses Claude only if you opt in)
 investment-monitor --type weekly
 
 # Dry run (show what would happen)
@@ -131,7 +131,18 @@ The weekly synthesis feature uses Claude Sonnet. Current pricing (2026):
 Create a `.env` file:
 
 ```bash
-# Optional: Claude API for weekly synthesis
+# Ollama endpoint (default: localhost)
+OLLAMA_HOST=http://localhost:11434
+
+# Local models — "auto" picks models that fit your RAM, or pin explicit tags.
+OLLAMA_MODEL=auto              # fast tier: news scoring, sentiment
+OLLAMA_SYNTHESIS_MODEL=auto    # heavy tier: weekly synthesis, research reports
+
+# Tier-2 provider: auto (Claude if key set, else local) | ollama (free) | anthropic
+LLM_PROVIDER=auto
+
+# Optional: Claude API (only if you want Claude-quality synthesis). Leave blank
+# to stay completely free on local models.
 ANTHROPIC_API_KEY=sk-ant-xxx
 
 # Optional: Slack notifications
@@ -139,10 +150,20 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/xxx
 
 # Optional: Email notifications
 SENDGRID_API_KEY=SG.xxx
-
-# Ollama endpoint (default: localhost)
-OLLAMA_HOST=http://localhost:11434
 ```
+
+**Model auto-selection:** with `OLLAMA_MODEL=auto`/`OLLAMA_SYNTHESIS_MODEL=auto`,
+the system detects total RAM (macOS, Windows, or Linux) and picks sensible models:
+
+| RAM | Fast (tier-1) | Synthesis (tier-2) |
+|-----|---------------|--------------------|
+| ≥60 GB | `qwen2.5:7b` | `qwen2.5:72b` |
+| ≥28 GB | `qwen2.5:7b` | `qwen2.5:32b` |
+| ≥14 GB | `qwen2.5:7b` | `qwen2.5:14b` |
+| ≥7 GB  | `llama3.1:8b` | `qwen2.5:7b` |
+| <7 GB  | `phi3:mini` | `phi3:mini` |
+
+Pin a specific tag any time (e.g. `OLLAMA_SYNTHESIS_MODEL=gpt-oss:20b`) to override.
 
 ### Alert Thresholds
 
@@ -230,20 +251,27 @@ docker-compose exec monitor investment-monitor --type regular
 
 ## Local LLM Setup (Ollama)
 
-For AI-powered news relevance scoring:
+Ollama powers all AI features for free: news relevance scoring (fast tier) and
+weekly synthesis / research reports (heavier tier).
 
 ```bash
 # Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
-# Pull a small model
-ollama pull phi3:mini
+# Pull the models for your tier (see the auto-selection table above).
+# Example for a 32GB+ machine:
+ollama pull qwen2.5:7b      # fast tier
+ollama pull qwen2.5:32b     # synthesis tier
+# Minimal machine:
+# ollama pull phi3:mini
 
 # Start service
 sudo systemctl enable --now ollama
 ```
 
-The system gracefully degrades if Ollama isn't available.
+With `OLLAMA_MODEL=auto`/`OLLAMA_SYNTHESIS_MODEL=auto` the system picks models
+by RAM; pin explicit tags to override. The system gracefully degrades if Ollama
+(or a selected model) isn't available — features that need it are skipped.
 
 ## Project Structure
 

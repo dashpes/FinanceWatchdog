@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ollama import GenerateResponse, ListResponse
+
 from investment_monitor.analysis.research_scorer import (
     DEFAULT_REASONING,
     DEFAULT_SCORE,
@@ -12,6 +14,16 @@ from investment_monitor.analysis.research_scorer import (
 )
 from investment_monitor.collectors.fundamentals import FundamentalsData
 from investment_monitor.models.research import ScoringWeights
+
+
+def _list(*model_names: str) -> ListResponse:
+    """Build an object-based ollama list() response (modern API shape)."""
+    return ListResponse(models=[ListResponse.Model(model=name) for name in model_names])
+
+
+def _gen(text: str) -> GenerateResponse:
+    """Build an object-based ollama generate() response (modern API shape)."""
+    return GenerateResponse(response=text)
 
 
 # =============================================================================
@@ -173,9 +185,7 @@ class TestResearchScorerAvailability:
 
         mock_ollama = MagicMock()
         mock_client = MagicMock()
-        mock_client.list.return_value = {
-            "models": [{"name": "llama2:7b"}, {"name": "phi3:mini"}]
-        }
+        mock_client.list.return_value = _list("llama2:7b", "phi3:mini")
         mock_ollama.Client.return_value = mock_client
 
         with patch.dict("sys.modules", {"ollama": mock_ollama}):
@@ -188,9 +198,7 @@ class TestResearchScorerAvailability:
 
         mock_ollama = MagicMock()
         mock_client = MagicMock()
-        mock_client.list.return_value = {
-            "models": [{"name": "llama2:7b"}, {"name": "phi3:mini"}]
-        }
+        mock_client.list.return_value = _list("llama2:7b", "phi3:mini")
         mock_ollama.Client.return_value = mock_client
 
         with patch.dict("sys.modules", {"ollama": mock_ollama}):
@@ -832,7 +840,7 @@ class TestGenerate:
         scorer = ResearchScorer()
 
         mock_client = MagicMock()
-        mock_client.generate.return_value = {"response": '  {"score": 75, "reasoning": "Test"}  '}
+        mock_client.generate.return_value = _gen('  {"score": 75, "reasoning": "Test"}  ')
         scorer._client = mock_client
 
         result = scorer._generate("Test prompt")
@@ -855,7 +863,7 @@ class TestGenerate:
         scorer = ResearchScorer(model="test-model")
 
         mock_client = MagicMock()
-        mock_client.generate.return_value = {"response": "test"}
+        mock_client.generate.return_value = _gen("test")
         scorer._client = mock_client
 
         scorer._generate("Test prompt")
@@ -890,10 +898,8 @@ class TestResearchScorerIntegration:
     ):
         """Test complete scoring flow from fundamentals to CandidateScore."""
         mock_module, mock_client = mock_ollama_module
-        mock_client.list.return_value = {"models": [{"name": "phi3:mini"}]}
-        mock_client.generate.return_value = {
-            "response": '{"score": 75, "reasoning": "Good stock"}'
-        }
+        mock_client.list.return_value = _list("phi3:mini")
+        mock_client.generate.return_value = _gen('{"score": 75, "reasoning": "Good stock"}')
 
         scorer = ResearchScorer()
 

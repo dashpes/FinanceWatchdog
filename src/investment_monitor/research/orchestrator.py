@@ -118,10 +118,14 @@ class ResearchOrchestrator:
         self._news_collector = NewsCollector(session, config)
         self._congress_collector = CongressTradesCollector(session, config)
 
-        # Initialize report generator
+        # Initialize report generator. Local Ollama is the free default; Claude
+        # is used only when selected via llm_provider / an Anthropic API key.
         self._report_generator = ResearchReportGenerator(
             api_key=config.anthropic_api_key,
             max_monthly_spend=research_config.claude_budget.monthly_limit_usd,
+            ollama_model=config.resolved_synthesis_model(),
+            ollama_host=config.ollama_host,
+            prefer_anthropic=config.prefer_anthropic_synthesis(),
         )
 
         # Initialize research queue
@@ -347,11 +351,19 @@ class ResearchOrchestrator:
         return candidate
 
     def _check_budget(self) -> bool:
-        """Check if Claude API budget allows report generation.
+        """Check if budget allows report generation.
+
+        The local Ollama provider is free, so budget never blocks when local
+        synthesis is selected. The Claude API budget is only enforced when
+        Claude is the chosen provider.
 
         Returns:
-            True if within budget, False if budget exceeded
+            True if generation may proceed, False if the Claude budget is exhausted.
         """
+        # Local provider is free; budget is irrelevant.
+        if not self.config.prefer_anthropic_synthesis():
+            return True
+
         if not self.research_config.claude_budget.enabled:
             return True
 

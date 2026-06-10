@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from .ollama_client import has_model, model_names, response_text
 from .research_prompts import (
     GROWTH_SCORE_PROMPT,
     MOMENTUM_SCORE_PROMPT,
@@ -110,19 +111,18 @@ class ResearchScorer:
         try:
             import ollama
             client = ollama.Client(host=self.base_url)
-            # List models to check if server is running
-            models = client.list()
-            model_names = [m.get("name", "") for m in models.get("models", [])]
+            # List models to check if server is running.
+            response = client.list()
 
-            # Check if our model is available (handle both full and short names)
-            base_model = self.model.split(":")[0]
-            for name in model_names:
-                if name == self.model or name.startswith(base_model):
-                    self._available = True
-                    return True
+            if has_model(response, self.model):
+                self._available = True
+                return True
 
-            # Model not found but server is running
-            logger.warning(f"Model {self.model} not found in Ollama. Available: {model_names}")
+            # Model not found but server is running.
+            logger.warning(
+                f"Model {self.model} not found in Ollama. "
+                f"Available: {model_names(response)}"
+            )
             self._available = False
             return False
 
@@ -153,7 +153,7 @@ class ResearchScorer:
                     "num_predict": 200,  # Allow enough tokens for JSON + reasoning
                 },
             )
-            return response.get("response", "").strip()
+            return response_text(response)
         except Exception as e:
             logger.debug(f"LLM generation failed: {e}")
             return None

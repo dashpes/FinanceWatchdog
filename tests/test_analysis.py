@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ollama import GenerateResponse, ListResponse
+
 from investment_monitor.analysis import (
     LocalLLM,
     RELEVANCE_PROMPT,
@@ -11,6 +13,16 @@ from investment_monitor.analysis import (
     SUMMARIZE_PROMPT,
 )
 from investment_monitor.analysis.local_llm import LocalLLM as LocalLLMClass
+
+
+def _list(*model_names: str) -> ListResponse:
+    """Build an object-based ollama list() response (modern API shape)."""
+    return ListResponse(models=[ListResponse.Model(model=name) for name in model_names])
+
+
+def _gen(text: str) -> GenerateResponse:
+    """Build an object-based ollama generate() response (modern API shape)."""
+    return GenerateResponse(response=text)
 
 
 # =============================================================================
@@ -127,9 +139,7 @@ class TestLocalLLMAvailability:
 
         mock_ollama = MagicMock()
         mock_client = MagicMock()
-        mock_client.list.return_value = {
-            "models": [{"name": "llama2:7b"}, {"name": "phi3:mini"}]
-        }
+        mock_client.list.return_value = _list("llama2:7b", "phi3:mini")
         mock_ollama.Client.return_value = mock_client
 
         with patch.dict("sys.modules", {"ollama": mock_ollama}):
@@ -142,9 +152,7 @@ class TestLocalLLMAvailability:
 
         mock_ollama = MagicMock()
         mock_client = MagicMock()
-        mock_client.list.return_value = {
-            "models": [{"name": "llama2:7b"}, {"name": "phi3:mini"}]
-        }
+        mock_client.list.return_value = _list("llama2:7b", "phi3:mini")
         mock_ollama.Client.return_value = mock_client
 
         with patch.dict("sys.modules", {"ollama": mock_ollama}):
@@ -452,7 +460,7 @@ class TestGenerate:
         llm = LocalLLM()
 
         mock_client = MagicMock()
-        mock_client.generate.return_value = {"response": "  Hello World  "}
+        mock_client.generate.return_value = _gen("  Hello World  ")
         llm._client = mock_client
 
         result = llm._generate("Test prompt")
@@ -475,7 +483,7 @@ class TestGenerate:
         llm = LocalLLM(model="test-model")
 
         mock_client = MagicMock()
-        mock_client.generate.return_value = {"response": "test"}
+        mock_client.generate.return_value = _gen("test")
         llm._client = mock_client
 
         llm._generate("Test prompt")
@@ -526,7 +534,7 @@ class TestLocalLLMWeeklySynthesis:
 
         # Mock the client directly since generate_weekly_synthesis uses custom options
         mock_client = MagicMock()
-        mock_client.generate.return_value = {"response": "Tech stocks showed mixed performance this week."}
+        mock_client.generate.return_value = _gen("Tech stocks showed mixed performance this week.")
         llm._client = mock_client
 
         with patch.object(llm, "is_available", return_value=True):
@@ -556,8 +564,8 @@ class TestLocalLLMIntegration:
     async def test_full_relevance_scoring_flow(self, mock_ollama_module):
         """Test complete relevance scoring flow."""
         mock_module, mock_client = mock_ollama_module
-        mock_client.list.return_value = {"models": [{"name": "phi3:mini"}]}
-        mock_client.generate.return_value = {"response": "8"}
+        mock_client.list.return_value = _list("phi3:mini")
+        mock_client.generate.return_value = _gen("8")
 
         llm = LocalLLM()
 
@@ -578,8 +586,8 @@ class TestLocalLLMIntegration:
     async def test_full_sentiment_classification_flow(self, mock_ollama_module):
         """Test complete sentiment classification flow."""
         mock_module, mock_client = mock_ollama_module
-        mock_client.list.return_value = {"models": [{"name": "phi3:mini"}]}
-        mock_client.generate.return_value = {"response": "bullish"}
+        mock_client.list.return_value = _list("phi3:mini")
+        mock_client.generate.return_value = _gen("bullish")
 
         llm = LocalLLM()
 

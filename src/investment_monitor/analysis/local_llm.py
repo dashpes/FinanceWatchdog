@@ -7,10 +7,15 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from .ollama_client import has_model, model_names, response_text
 from .prompts import RELEVANCE_PROMPT, SENTIMENT_PROMPT, SUMMARIZE_PROMPT
 
 if TYPE_CHECKING:
     import ollama
+
+    from investment_monitor.models import Portfolio
+
+    from .claude_api import WeeklyData
 
 
 class LocalLLM:
@@ -57,35 +62,18 @@ class LocalLLM:
         try:
             import ollama
             client = ollama.Client(host=self.base_url)
-            # List models to check if server is running
+            # List models to check if server is running.
             response = client.list()
 
-            # Handle both old dict-based API and new object-based API
-            model_names: list[str] = []
-            if hasattr(response, "models"):
-                # New API: response.models is a list of Model objects
-                for m in response.models:
-                    # Model object has 'model' attribute (e.g., "phi3:mini")
-                    name = getattr(m, "model", None) or getattr(m, "name", "")
-                    if name:
-                        model_names.append(name)
-            elif isinstance(response, dict):
-                # Old API: response is a dict with "models" key
-                for m in response.get("models", []):
-                    name = m.get("name", "") or m.get("model", "")
-                    if name:
-                        model_names.append(name)
+            if has_model(response, self.model):
+                self._available = True
+                return True
 
-            # Check if our model is available (handle both full and short names)
-            # e.g., "phi3:mini" should match "phi3:mini" or "phi3:latest"
-            base_model = self.model.split(":")[0]
-            for name in model_names:
-                if name == self.model or name.startswith(base_model):
-                    self._available = True
-                    return True
-
-            # Model not found but server is running
-            logger.warning(f"Model {self.model} not found in Ollama. Available: {model_names}")
+            # Model not found but server is running.
+            logger.warning(
+                f"Model {self.model} not found in Ollama. "
+                f"Available: {model_names(response)}"
+            )
             self._available = False
             return False
 
@@ -116,7 +104,42 @@ class LocalLLM:
                     "num_predict": 50,   # Limit response length
                 },
             )
-            return response.get("response", "").strip()
+            return response_text(response)
+        except Exception as e:
+            logger.debug(f"LLM generation failed: {e}")
+            return None
+
+    def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.2,
+        num_predict: int = 200,
+    ) -> str | None:
+        """Generate text with caller-specified options (object-based API).
+
+        Unlike the internal ``_generate`` (tuned for short scoring replies), this
+        lets longer-form callers such as research-report generation request a
+        larger token budget.
+
+        Args:
+            prompt: The prompt to send to the LLM.
+            temperature: Sampling temperature.
+            num_predict: Maximum tokens to generate.
+
+        Returns:
+            The generated text, or None if unavailable.
+        """
+        try:
+            response = self.client.generate(
+                model=self.model,
+                prompt=prompt,
+                options={
+                    "temperature": temperature,
+                    "num_predict": num_predict,
+                },
+            )
+            return response_text(response) or None
         except Exception as e:
             logger.debug(f"LLM generation failed: {e}")
             return None
@@ -249,9 +272,52 @@ class LocalLLM:
                     "num_predict": 150,
                 },
             )
-            return response.get("response", "").strip()
+            return response_text(response)
         except Exception as e:
             logger.debug(f"Weekly synthesis generation failed: {e}")
+            return ""
+
+    async def weekly_synthesis(
+        self,
+        portfolio: Portfolio,
+        week_data: WeeklyData,
+        max_tokens: int = 400,
+    ) -> str:
+        """Generate a full weekly portfolio synthesis locally (free, no API key).
+
+        This mirrors ClaudeAnalyzer.weekly_synthesis but runs entirely on the
+        local Ollama model, using the same rich prompt (portfolio + price /
+        insider / news / earnings summaries). It is the default tier-2 provider.
+
+        Args:
+            portfolio: The user's portfolio to analyze.
+            week_data: Aggregated data for the week.
+            max_tokens: Maximum tokens for the response.
+
+        Returns:
+            The synthesis text, or an empty string if the local LLM is unavailable.
+        """
+        if not self.is_available():
+            return ""
+
+        # Imported lazily to keep the module import graph light and avoid any
+        # import-order coupling within the analysis package.
+        from .claude_api import build_weekly_synthesis_prompt
+
+        prompt = build_weekly_synthesis_prompt(portfolio, week_data)
+
+        try:
+            response = self.client.generate(
+                model=self.model,
+                prompt=prompt,
+                options={
+                    "temperature": 0.3,
+                    "num_predict": max_tokens,
+                },
+            )
+            return response_text(response)
+        except Exception as e:
+            logger.debug(f"Local weekly synthesis generation failed: {e}")
             return ""
 
     @staticmethod

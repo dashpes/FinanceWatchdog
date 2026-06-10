@@ -70,6 +70,47 @@ Please provide:
 Keep your response concise and actionable. Focus on signal, not noise."""
 
 
+def build_weekly_synthesis_prompt(portfolio: Portfolio, week_data: WeeklyData) -> str:
+    """Build the weekly synthesis prompt shared by the Claude and local providers.
+
+    Args:
+        portfolio: The user's portfolio.
+        week_data: Aggregated weekly data.
+
+    Returns:
+        Formatted prompt string for an LLM.
+    """
+    # Convert portfolio to YAML for clear, model-friendly formatting.
+    portfolio_dict = {
+        "holdings": [
+            {
+                "ticker": h.ticker,
+                "shares": float(h.shares),
+                "cost_basis": float(h.cost_basis),
+                "thesis": h.thesis or "No thesis specified",
+            }
+            for h in portfolio.holdings
+        ],
+        "watchlist": [
+            {
+                "ticker": w.ticker,
+                "reason": w.reason or "No reason specified",
+                "target_price": float(w.target_price) if w.target_price else None,
+            }
+            for w in portfolio.watchlist
+        ],
+    }
+    portfolio_yaml = yaml.dump(portfolio_dict, default_flow_style=False, sort_keys=False)
+
+    return WEEKLY_SYNTHESIS_PROMPT.format(
+        portfolio_yaml=portfolio_yaml,
+        price_summary=week_data.price_summary,
+        insider_summary=week_data.insider_summary,
+        news_summary=week_data.news_summary,
+        earnings_summary=week_data.earnings_summary,
+    )
+
+
 class WeeklyData(BaseModel):
     """Aggregated data for weekly synthesis.
 
@@ -222,35 +263,7 @@ class ClaudeAnalyzer:
         Returns:
             Formatted prompt string for Claude.
         """
-        # Convert portfolio to YAML for clear formatting
-        portfolio_dict = {
-            "holdings": [
-                {
-                    "ticker": h.ticker,
-                    "shares": float(h.shares),
-                    "cost_basis": float(h.cost_basis),
-                    "thesis": h.thesis or "No thesis specified",
-                }
-                for h in portfolio.holdings
-            ],
-            "watchlist": [
-                {
-                    "ticker": w.ticker,
-                    "reason": w.reason or "No reason specified",
-                    "target_price": float(w.target_price) if w.target_price else None,
-                }
-                for w in portfolio.watchlist
-            ],
-        }
-        portfolio_yaml = yaml.dump(portfolio_dict, default_flow_style=False, sort_keys=False)
-
-        return WEEKLY_SYNTHESIS_PROMPT.format(
-            portfolio_yaml=portfolio_yaml,
-            price_summary=week_data.price_summary,
-            insider_summary=week_data.insider_summary,
-            news_summary=week_data.news_summary,
-            earnings_summary=week_data.earnings_summary,
-        )
+        return build_weekly_synthesis_prompt(portfolio, week_data)
 
     async def weekly_synthesis(
         self,

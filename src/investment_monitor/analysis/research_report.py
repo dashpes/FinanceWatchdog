@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from .local_llm import LocalLLM
+
 if TYPE_CHECKING:
     from ..collectors.fundamentals import FundamentalsData
     from ..storage.research_models import CandidateScore, ResearchReport
@@ -133,20 +135,39 @@ class ResearchReportGenerator:
         api_key: str | None = None,
         max_monthly_spend: float = 50.0,
         model: str = "claude-sonnet-4-20250514",
+        ollama_model: str | None = None,
+        ollama_host: str = "http://localhost:11434",
+        prefer_anthropic: bool = True,
     ):
         """Initialize the Research Report Generator.
 
+        Supports two providers: the paid Claude API and a free local Ollama
+        model. When ``ollama_model`` is provided, reports can be generated
+        entirely locally (no API key, no cost). When both are configured,
+        ``prefer_anthropic`` decides which is used, with local as a fallback.
+
         Args:
-            api_key: Anthropic API key. If None, API features are disabled.
-            max_monthly_spend: Maximum monthly spend limit in USD (default: $50.00)
+            api_key: Anthropic API key. If None, the Claude path is disabled.
+            max_monthly_spend: Maximum monthly Claude spend limit in USD.
             model: Claude model to use (default: claude-sonnet-4-20250514)
+            ollama_model: Local Ollama model for free report generation. If None,
+                the local path is disabled (preserving Claude-only behavior).
+            ollama_host: Ollama server URL.
+            prefer_anthropic: When both providers are available, use Claude first
+                and fall back to local Ollama if Claude is over budget or fails.
         """
         self._client = None
         self._api_key = api_key
         self.max_monthly_spend = max_monthly_spend
         self.model = model
+        self.prefer_anthropic = prefer_anthropic
         self._monthly_spend = 0.0
         self._spend_reset_date: date | None = None
+
+        # Local provider is opt-in: only configured when an Ollama model is given.
+        self._local = (
+            LocalLLM(model=ollama_model, base_url=ollama_host) if ollama_model else None
+        )
 
         if api_key:
             try:
@@ -158,12 +179,15 @@ class ResearchReportGenerator:
                 logger.warning("anthropic package not installed, research report features unavailable")
 
     def is_available(self) -> bool:
-        """Check if Claude API is configured and available.
+        """Check if any report provider (Claude or local Ollama) is available.
 
         Returns:
-            True if API key is set and anthropic package is installed.
+            True if the Claude client is configured, or a local Ollama model is
+            configured and reachable.
         """
-        return self._client is not None
+        if self._client is not None:
+            return True
+        return self._local is not None and self._local.is_available()
 
     def get_monthly_spend(self) -> float:
         """Get current monthly spend.
@@ -467,6 +491,111 @@ class ResearchReportGenerator:
                 error_message=f"JSON parse error: {str(e)}",
             )
 
+    def _run_claude(self, prompt: str, ticker: str, max_tokens: int) -> ReportResult:
+        """Generate a report via the Claude API and record cost."""
+        try:
+            response = self._client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            cost = self._record_cost(input_tokens, output_tokens)
+
+            result = self._parse_report_response(response.content[0].text, ticker)
+            result.input_tokens = input_tokens
+            result.output_tokens = output_tokens
+            result.cost = cost
+            return result
+
+        except Exception as e:
+            logger.error(f"API error generating report for {ticker}: {e}")
+            return ReportResult(
+                report=None,
+                success=False,
+                error_message=f"API error: {str(e)}",
+            )
+
+    def _run_local(self, prompt: str, ticker: str, max_tokens: int) -> ReportResult:
+        """Generate a report via the local Ollama model (free, no cost tracked)."""
+        text = self._local.generate(prompt, temperature=0.3, num_predict=max_tokens)
+        if not text:
+            return ReportResult(
+                report=None,
+                success=False,
+                error_message="Local report generation returned no output",
+            )
+        # Cost and tokens stay at their zero defaults for the free local path.
+        return self._parse_report_response(text, ticker)
+
+    def _generate_report(
+        self,
+        ticker: str,
+        company_name: str,
+        fundamentals: FundamentalsData,
+        score_result: CandidateScore,
+        price_summary: str = "",
+        congress_summary: str = "",
+        max_tokens: int = 2000,
+    ) -> ReportResult:
+        """Provider-agnostic report generation shared by the async/sync entry points.
+
+        Routes to Claude when selected and within budget, otherwise to the free
+        local Ollama model. Claude failures or budget exhaustion fall back to
+        local when a local model is configured and reachable.
+        """
+        if not self.is_available():
+            return ReportResult(
+                report=None,
+                success=False,
+                error_message="Research report generation unavailable (no API key or anthropic not installed)",
+            )
+
+        prompt = self._build_report_prompt(
+            ticker=ticker,
+            company_name=company_name,
+            fundamentals=fundamentals,
+            score_result=score_result,
+            price_summary=price_summary,
+            congress_summary=congress_summary,
+        )
+
+        use_claude = self._client is not None and self.prefer_anthropic
+        local_available = self._local is not None and self._local.is_available()
+
+        if use_claude:
+            if self._within_budget():
+                result = self._run_claude(prompt, ticker, max_tokens)
+                if result.success or not local_available:
+                    return result
+                logger.warning(
+                    f"Claude report failed ({result.error_message}); "
+                    "falling back to local LLM"
+                )
+            elif not local_available:
+                return ReportResult(
+                    report=None,
+                    success=False,
+                    error_message=(
+                        f"Research report generation skipped "
+                        f"(budget limit of ${self.max_monthly_spend:.2f} reached)"
+                    ),
+                )
+            else:
+                logger.info("Claude over budget; generating report locally")
+
+        if local_available:
+            return self._run_local(prompt, ticker, max_tokens)
+
+        # Claude unusable (e.g. provider set to local) and no local model reachable.
+        return ReportResult(
+            report=None,
+            success=False,
+            error_message="Research report generation unavailable (no API key or anthropic not installed)",
+        )
+
     async def generate_report(
         self,
         ticker: str,
@@ -478,6 +607,9 @@ class ResearchReportGenerator:
         max_tokens: int = 2000,
     ) -> ReportResult:
         """Generate a comprehensive research report for a stock.
+
+        Uses the configured provider (Claude or local Ollama). See
+        ``_generate_report`` for the provider-selection rules.
 
         Args:
             ticker: Stock ticker symbol
@@ -491,58 +623,15 @@ class ResearchReportGenerator:
         Returns:
             ReportResult containing the ResearchReport or error message.
         """
-        if not self.is_available():
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message="Research report generation unavailable (no API key or anthropic not installed)",
-            )
-
-        if not self._within_budget():
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message=f"Research report generation skipped (budget limit of ${self.max_monthly_spend:.2f} reached)",
-            )
-
-        prompt = self._build_report_prompt(
+        return self._generate_report(
             ticker=ticker,
             company_name=company_name,
             fundamentals=fundamentals,
             score_result=score_result,
             price_summary=price_summary,
             congress_summary=congress_summary,
+            max_tokens=max_tokens,
         )
-
-        try:
-            # Use synchronous call wrapped for async compatibility
-            response = self._client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-            cost = self._record_cost(input_tokens, output_tokens)
-
-            response_text = response.content[0].text
-
-            # Parse the response
-            result = self._parse_report_response(response_text, ticker)
-            result.input_tokens = input_tokens
-            result.output_tokens = output_tokens
-            result.cost = cost
-
-            return result
-
-        except Exception as e:
-            logger.error(f"API error generating report for {ticker}: {e}")
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message=f"API error: {str(e)}",
-            )
 
     def generate_report_sync(
         self,
@@ -568,54 +657,12 @@ class ResearchReportGenerator:
         Returns:
             ReportResult containing the ResearchReport or error message.
         """
-        if not self.is_available():
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message="Research report generation unavailable (no API key or anthropic not installed)",
-            )
-
-        if not self._within_budget():
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message=f"Research report generation skipped (budget limit of ${self.max_monthly_spend:.2f} reached)",
-            )
-
-        prompt = self._build_report_prompt(
+        return self._generate_report(
             ticker=ticker,
             company_name=company_name,
             fundamentals=fundamentals,
             score_result=score_result,
             price_summary=price_summary,
             congress_summary=congress_summary,
+            max_tokens=max_tokens,
         )
-
-        try:
-            response = self._client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
-            cost = self._record_cost(input_tokens, output_tokens)
-
-            response_text = response.content[0].text
-
-            # Parse the response
-            result = self._parse_report_response(response_text, ticker)
-            result.input_tokens = input_tokens
-            result.output_tokens = output_tokens
-            result.cost = cost
-
-            return result
-
-        except Exception as e:
-            logger.error(f"API error generating report for {ticker}: {e}")
-            return ReportResult(
-                report=None,
-                success=False,
-                error_message=f"API error: {str(e)}",
-            )

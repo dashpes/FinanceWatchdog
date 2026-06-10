@@ -370,7 +370,7 @@ async def _process_news_ai(
         Number of news items processed
     """
     llm = LocalLLM(
-        model=settings.ollama_model,
+        model=settings.resolved_ollama_model(),
         base_url=settings.ollama_host,
     )
 
@@ -510,6 +510,64 @@ async def _send_daily_digest(
             logger.error(f"Failed to send daily digest via Discord: {e}")
 
 
+async def _generate_weekly_synthesis(
+    settings: Settings,
+    portfolio: Portfolio,
+    week_data: WeeklyData,
+) -> str | None:
+    """Generate the weekly AI synthesis, defaulting to a free local model.
+
+    Provider is chosen by ``settings.prefer_anthropic_synthesis()``:
+    - Claude when explicitly selected (llm_provider="anthropic", or "auto" with
+      an API key set), with graceful fallback to local Ollama if Claude fails.
+    - Local Ollama otherwise (completely free, no API key required).
+
+    Args:
+        settings: Application settings.
+        portfolio: Portfolio for context.
+        week_data: Aggregated weekly data summary.
+
+    Returns:
+        The synthesis text, or None if no provider produced one.
+    """
+    if settings.prefer_anthropic_synthesis():
+        analyzer = ClaudeAnalyzer(
+            api_key=settings.anthropic_api_key,
+            max_monthly_spend=5.00,
+        )
+        if analyzer.is_available():
+            result = await analyzer.weekly_synthesis(portfolio, week_data)
+            if result.success:
+                logger.info(
+                    f"Generated Claude AI synthesis ({result.input_tokens} input, "
+                    f"{result.output_tokens} output tokens, ${result.cost:.4f})"
+                )
+                return result.synthesis
+            logger.warning(f"Claude synthesis failed: {result.error_message}")
+        else:
+            logger.info("Claude API selected but unavailable; falling back to local LLM")
+
+    # Free, local-default path via Ollama (also the fallback if Claude failed).
+    synth_llm = LocalLLM(
+        model=settings.resolved_synthesis_model(),
+        base_url=settings.ollama_host,
+    )
+    if not synth_llm.is_available():
+        logger.info(
+            f"Local synthesis model '{synth_llm.model}' unavailable in Ollama; "
+            "skipping AI synthesis"
+        )
+        return None
+
+    synthesis = await synth_llm.weekly_synthesis(portfolio, week_data)
+    if synthesis:
+        logger.info(f"Generated local AI synthesis with {synth_llm.model}")
+        return synthesis
+
+    logger.warning("Local weekly synthesis returned an empty result")
+    return None
+
+
 async def _send_weekly_digest(
     session: Session,
     portfolio: Portfolio,
@@ -549,31 +607,10 @@ async def _send_weekly_digest(
         except Exception as e:
             logger.warning(f"Failed to convert alert record: {e}")
 
-    # Prepare data for AI synthesis
-    ai_synthesis = None
-
-    if settings.anthropic_api_key:
-        analyzer = ClaudeAnalyzer(
-            api_key=settings.anthropic_api_key,
-            max_monthly_spend=5.00,
-        )
-
-        if analyzer.is_available():
-            # Build weekly data summary
-            week_data = _build_weekly_data(session, portfolio, week_start, week_end)
-
-            result = await analyzer.weekly_synthesis(portfolio, week_data)
-
-            if result.success:
-                ai_synthesis = result.synthesis
-                logger.info(
-                    f"Generated AI synthesis ({result.input_tokens} input, "
-                    f"{result.output_tokens} output tokens, ${result.cost:.4f})"
-                )
-            else:
-                logger.warning(f"AI synthesis failed: {result.error_message}")
-        else:
-            logger.info("Claude API not available for weekly synthesis")
+    # Generate AI synthesis. Local Ollama is the free default; Claude is used
+    # only when selected via llm_provider / an Anthropic API key.
+    week_data = _build_weekly_data(session, portfolio, week_start, week_end)
+    ai_synthesis = await _generate_weekly_synthesis(settings, portfolio, week_data)
 
     # Format and log the digest
     plain_text, html = format_weekly_digest(
