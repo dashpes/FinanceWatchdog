@@ -25,13 +25,63 @@ from ..analysis.ollama_client import model_matches
 from ..config import Settings, get_settings
 from ..diagnostics import _probe_ollama
 from ..main import _load_portfolio, run_monitor_sync
-from ..models import Portfolio
+from ..models import AlertsConfig, Portfolio
+from ..setup_wizard import _pull_model
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
 _STATIC_DIR = Path(__file__).parent / "static"
 VALID_RUN_TYPES = ("regular", "digest", "weekly")
+VALID_PROVIDERS = ("auto", "ollama", "anthropic")
+_ENV_PATH = Path(".env")
+
+# Maps Settings field -> .env variable name for editable values.
+_LLM_ENV = {
+    "ollama_host": "OLLAMA_HOST",
+    "ollama_model": "OLLAMA_MODEL",
+    "ollama_synthesis_model": "OLLAMA_SYNTHESIS_MODEL",
+    "llm_provider": "LLM_PROVIDER",
+}
+# Secret/token settings: only written when a non-empty value is provided.
+_SECRET_ENV = {
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "discord_webhook_url": "DISCORD_WEBHOOK_URL",
+    "discord_daily_webhook_url": "DISCORD_DAILY_WEBHOOK_URL",
+    "discord_weekly_webhook_url": "DISCORD_WEEKLY_WEBHOOK_URL",
+    "slack_webhook_url": "SLACK_WEBHOOK_URL",
+    "sendgrid_api_key": "SENDGRID_API_KEY",
+}
+
+
+def update_env_file(path: Path, updates: dict[str, str]) -> None:
+    """Update/append KEY=VALUE pairs in a .env file, preserving other lines.
+
+    Existing keys are updated in place; unknown keys are appended; comments and
+    unrelated lines are left untouched.
+
+    Args:
+        path: Path to the .env file (created if missing).
+        updates: Mapping of ENV_VAR -> value to write.
+    """
+    if not updates:
+        return
+    lines = path.read_text().splitlines() if path.exists() else []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                out.append(f"{key}={updates[key]}")
+                seen.add(key)
+                continue
+        out.append(line)
+    for key, val in updates.items():
+        if key not in seen:
+            out.append(f"{key}={val}")
+    path.write_text("\n".join(out) + "\n")
 
 
 def _build_status(settings: Settings) -> dict[str, Any]:
@@ -105,6 +155,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "error": None,
     }
     app.state.run_lock = threading.Lock()
+
+    # Background model-pull state (single pull at a time).
+    app.state.pull = {"status": "idle", "model": None, "error": None}
+    app.state.pull_lock = threading.Lock()
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -194,6 +248,110 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         threading.Thread(target=_job, daemon=True).start()
         return JSONResponse(status_code=202, content={"status": "started", "run_type": run_type})
+
+    # ---- Settings ---------------------------------------------------------
+    @app.get("/api/settings")
+    def get_settings_api() -> dict[str, Any]:
+        alerts_path = settings.config_dir / "alerts.yaml"
+        alerts = AlertsConfig.from_yaml(alerts_path) if alerts_path.exists() else AlertsConfig()
+        return {
+            "llm": {
+                "ollama_host": settings.ollama_host,
+                "ollama_model": settings.ollama_model,
+                "ollama_synthesis_model": settings.ollama_synthesis_model,
+                "llm_provider": settings.llm_provider,
+                "anthropic_api_key_set": bool(settings.anthropic_api_key),
+            },
+            "notifications": {
+                "discord_webhook_url_set": bool(settings.discord_webhook_url),
+                "discord_daily_webhook_url_set": bool(settings.discord_daily_webhook_url),
+                "discord_weekly_webhook_url_set": bool(settings.discord_weekly_webhook_url),
+                "slack_webhook_url_set": bool(settings.slack_webhook_url),
+                "sendgrid_api_key_set": bool(settings.sendgrid_api_key),
+            },
+            "alerts": alerts.model_dump(),
+        }
+
+    @app.put("/api/settings")
+    def put_settings_api(payload: dict = Body(...)) -> dict[str, Any]:
+        env_updates: dict[str, str] = {}
+
+        # LLM (plain values: always applied when present)
+        llm = payload.get("llm") or {}
+        provider = llm.get("llm_provider")
+        if provider is not None and provider not in VALID_PROVIDERS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid llm_provider '{provider}'. Use one of {VALID_PROVIDERS}.",
+            )
+        for field, env in _LLM_ENV.items():
+            if field in llm and llm[field] is not None:
+                val = str(llm[field]).strip()
+                setattr(settings, field, val)
+                env_updates[env] = val
+
+        # Secrets/tokens (LLM + notifications): only updated when non-empty.
+        secrets = {**llm, **(payload.get("notifications") or {})}
+        for field, env in _SECRET_ENV.items():
+            val = secrets.get(field)
+            if val:  # non-empty -> update; blank/missing -> keep existing
+                setattr(settings, field, val)
+                env_updates[env] = val
+
+        # Alert thresholds -> alerts.yaml
+        if "alerts" in payload and payload["alerts"] is not None:
+            try:
+                alerts = AlertsConfig(**payload["alerts"])
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=f"Invalid alerts config: {e}") from e
+            settings.config_dir.mkdir(parents=True, exist_ok=True)
+            alerts.to_yaml(settings.config_dir / "alerts.yaml")
+
+        update_env_file(_ENV_PATH, env_updates)
+        return get_settings_api()
+
+    # ---- Model management -------------------------------------------------
+    @app.get("/api/models")
+    def get_models() -> dict[str, Any]:
+        reachable, installed, err = _probe_ollama(settings.ollama_host)
+        with app.state.pull_lock:
+            pull_state = dict(app.state.pull)
+        return {
+            "reachable": reachable,
+            "error": err,
+            "installed": installed,
+            "fast_model": settings.resolved_ollama_model(),
+            "synthesis_model": settings.resolved_synthesis_model(),
+            "pull": pull_state,
+        }
+
+    @app.post("/api/models/pull")
+    def pull_model(payload: dict = Body(...)) -> JSONResponse:
+        model = (payload or {}).get("model", "").strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="A 'model' tag is required.")
+
+        with app.state.pull_lock:
+            if app.state.pull["status"] == "pulling":
+                return JSONResponse(
+                    status_code=409,
+                    content={"status": "pulling", "model": app.state.pull["model"]},
+                )
+            app.state.pull.update(status="pulling", model=model, error=None)
+
+        def _job() -> None:
+            ok = _pull_model(model)
+            with app.state.pull_lock:
+                if ok:
+                    app.state.pull.update(status="done", error=None)
+                else:
+                    app.state.pull.update(
+                        status="error",
+                        error=f"Pull failed. Is Ollama installed/running? Try: ollama pull {model}",
+                    )
+
+        threading.Thread(target=_job, daemon=True).start()
+        return JSONResponse(status_code=202, content={"status": "started", "model": model})
 
     return app
 

@@ -110,3 +110,97 @@ def test_run_triggers_and_completes(client):
     assert state["run_type"] == "regular"
     assert fake_summary in state["summary"]
     mock_run.assert_called_once()
+
+
+# --- Settings ---------------------------------------------------------------
+
+def test_get_settings_shape(client):
+    s = client.get("/api/settings").json()
+    assert s["llm"]["ollama_model"] == "qwen2.5:7b"
+    assert s["llm"]["llm_provider"] == "ollama"
+    assert s["llm"]["anthropic_api_key_set"] is False
+    assert "alerts" in s and "price" in s["alerts"]
+    assert s["notifications"]["sendgrid_api_key_set"] is False
+
+
+def test_put_settings_updates_llm_alerts_and_env(client, settings, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # .env is written relative to cwd
+    payload = {
+        "llm": {"llm_provider": "anthropic", "ollama_model": "llama3.1:8b",
+                "anthropic_api_key": "sk-ant-secret"},
+        "alerts": {"price": {"daily_drop_pct": 9.0}},
+    }
+    r = client.put("/api/settings", json=payload)
+    assert r.status_code == 200
+    # Live settings object is mutated immediately.
+    assert settings.llm_provider == "anthropic"
+    assert settings.ollama_model == "llama3.1:8b"
+    assert settings.anthropic_api_key == "sk-ant-secret"
+    # Persisted to .env (so the next run/restart picks it up).
+    env_text = (tmp_path / ".env").read_text()
+    assert "LLM_PROVIDER=anthropic" in env_text
+    assert "ANTHROPIC_API_KEY=sk-ant-secret" in env_text
+    # Alerts written to alerts.yaml and reflected on GET.
+    assert (settings.config_dir / "alerts.yaml").exists()
+    got = client.get("/api/settings").json()
+    assert got["alerts"]["price"]["daily_drop_pct"] == 9.0
+    assert got["llm"]["anthropic_api_key_set"] is True
+
+
+def test_put_settings_invalid_provider_422(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    r = client.put("/api/settings", json={"llm": {"llm_provider": "nope"}})
+    assert r.status_code == 422
+
+
+def test_put_settings_blank_secret_keeps_existing(client, settings, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client.put("/api/settings", json={"llm": {"anthropic_api_key": "sk-keep"}})
+    # Blank value must not wipe the stored key.
+    client.put("/api/settings", json={"llm": {"anthropic_api_key": ""}})
+    assert settings.anthropic_api_key == "sk-keep"
+
+
+def test_env_writer_preserves_comments_and_updates(tmp_path):
+    from investment_monitor.web.app import update_env_file
+
+    env = tmp_path / ".env"
+    env.write_text("# my config\nOLLAMA_MODEL=auto\nKEEP=1\n")
+    update_env_file(env, {"OLLAMA_MODEL": "qwen2.5:7b", "NEWKEY": "x"})
+    text = env.read_text()
+    assert "# my config" in text
+    assert "OLLAMA_MODEL=qwen2.5:7b" in text
+    assert "auto" not in text
+    assert "KEEP=1" in text
+    assert "NEWKEY=x" in text
+
+
+# --- Model management -------------------------------------------------------
+
+def test_models_endpoint(client):
+    with patch(
+        "investment_monitor.web.app._probe_ollama",
+        return_value=(True, ["qwen2.5:7b"], None),
+    ):
+        m = client.get("/api/models").json()
+    assert m["reachable"] is True
+    assert m["installed"] == ["qwen2.5:7b"]
+    assert m["fast_model"] == "qwen2.5:7b"
+    assert m["pull"]["status"] == "idle"
+
+
+def test_pull_model_requires_tag(client):
+    assert client.post("/api/models/pull", json={"model": ""}).status_code == 400
+
+
+def test_pull_model_runs(client):
+    with patch("investment_monitor.web.app._pull_model", return_value=True) as mock_pull:
+        r = client.post("/api/models/pull", json={"model": "qwen2.5:7b"})
+        assert r.status_code == 202
+        for _ in range(50):
+            st = client.get("/api/models").json()["pull"]
+            if st["status"] in ("done", "error"):
+                break
+            time.sleep(0.05)
+    assert st["status"] == "done"
+    mock_pull.assert_called_once_with("qwen2.5:7b")

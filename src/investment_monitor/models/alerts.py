@@ -90,3 +90,8 @@ class AlertsConfig(BaseModel):
         with open(path) as f:
             data = yaml.safe_load(f) or {}
         return cls(**data)
+
+    def to_yaml(self, path: Path) -> None:
+        """Write the alerts config to a YAML file (counterpart to from_yaml)."""
+        with open(path, "w") as f:
+            yaml.dump(self.model_dump(), f, default_flow_style=False, sort_keys=False)
