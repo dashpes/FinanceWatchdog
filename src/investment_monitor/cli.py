@@ -114,6 +114,20 @@ Cron examples:
     )
 
     parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="First-run setup: create config files from templates and check/pull "
+        "local models, then exit",
+    )
+
+    parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Assume yes to prompts (used with --setup to pull models unattended)",
+    )
+
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -138,6 +152,12 @@ def main(argv: list[str] | None = None) -> int:
     # Handle quiet mode
     log_level = "ERROR" if args.quiet else args.log_level
 
+    # Handle first-run setup
+    if args.setup:
+        from investment_monitor.setup_wizard import run_setup
+
+        return run_setup(assume_yes=args.yes)
+
     # Handle diagnostics
     if args.doctor:
         from investment_monitor.diagnostics import build_doctor_report
@@ -147,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Handle dry run
     if args.dry_run:
-        print(f"Dry run mode - would execute:")
+        print("Dry run mode - would execute:")
         print(f"  Run type: {args.type}")
         print(f"  Config path: {args.config or 'default'}")
         print(f"  Log level: {log_level}")

@@ -17,28 +17,45 @@ A personal investment monitoring system that tracks your portfolio, collects mar
 
 ### 1. Install
 
+**Easiest (macOS / Linux) — one command.** Installs the app, sets up a virtual
+environment, installs Ollama, pulls the right local models for your machine, and
+creates your config:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dashpes/FinanceWatchdog/main/scripts/install.sh | bash
+```
+
+By default it installs to `~/FinanceWatchdog` (override with `FW_INSTALL_DIR`).
+
+<details>
+<summary>Manual install (any OS, or for development)</summary>
+
 ```bash
 # Clone
-git clone https://github.com/your-repo/investment-monitor.git
-cd investment-monitor
+git clone https://github.com/dashpes/FinanceWatchdog.git
+cd FinanceWatchdog
 
 # Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install with all extras
-pip install -e ".[dev,ai,notifications]"
+# Install with the extras you want
+pip install -e ".[ai,notifications,dashboard]"
+
+# First-run setup: create config files + check/pull local models
+investment-monitor --setup        # add --yes to pull models automatically
 ```
+</details>
 
 ### 2. Configure
 
-```bash
-# Copy example configs
-cp config/portfolio.yaml.example config/portfolio.yaml
-cp config/alerts.yaml.example config/alerts.yaml
+Setup created your config files from templates. Just edit your holdings:
 
-# Edit your portfolio
+```bash
 nano config/portfolio.yaml
+
+# Verify your AI/setup at any time:
+investment-monitor --doctor
 ```
 
 **portfolio.yaml example:**
