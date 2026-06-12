@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Investment Monitor</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171c24; --panel2: #1d242e; --border: #2a323d;
+    --text: #e6edf3; --muted: #8b98a8; --accent: #4f9cf9; --accent2: #2d7d46;
+    --danger: #d9534f; --warn: #d6a635; --ok: #3fb950; --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  header h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent2); }
+  .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px; display: grid; gap: 20px; }
+  .grid { display: grid; gap: 20px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 14px; }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px dashed var(--border); }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: var(--muted); }
+  .row .v { font-variant-numeric: tabular-nums; }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #06121f; font-weight: 600; }
+  button.small { padding: 4px 8px; font-size: 12px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }
+  .badge.ok { color: var(--ok); border-color: #234d32; background: #122017; }
+  .badge.bad { color: var(--danger); border-color: #51262524; background: #211314; }
+  .badge.warn { color: var(--warn); border-color: #4d4423; background: #201d12; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 500; }
+  td input { width: 100%; background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 6px; font-size: 13px; }
+  td.num input { text-align: right; font-variant-numeric: tabular-nums; }
+  .alert { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .alert:last-child { border-bottom: 0; }
+  .alert .meta { color: var(--muted); font-size: 12px; }
+  .pri-high { color: var(--danger); } .pri-medium { color: var(--warn); } .pri-low { color: var(--muted); }
+  .muted { color: var(--muted); }
+  #toast {
+    position: fixed; bottom: 20px; right: 20px; background: var(--panel2); border: 1px solid var(--border);
+    padding: 12px 16px; border-radius: 8px; opacity: 0; transform: translateY(10px);
+    transition: all .2s; pointer-events: none; max-width: 340px;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  .run-status { font-size: 13px; color: var(--muted); }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot"></span> Investment Monitor</h1>
+  <div class="actions">
+    <span id="run-status" class="run-status"></span>
+    <button data-run="regular">Run regular</button>
+    <button data-run="digest">Daily digest</button>
+    <button data-run="weekly">Weekly synthesis</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid">
+    <section class="card" id="status-card">
+      <h2>System &amp; AI status</h2>
+      <div id="status-body" class="muted">Loading…</div>
+    </section>
+
+    <section class="card" id="alerts-card">
+      <h2>Recent alerts (7 days)</h2>
+      <div id="alerts-body" class="muted">Loading…</div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="toolbar">
+      <h2 style="margin:0">Portfolio</h2>
+      <div class="actions">
+        <button class="small" id="add-holding">+ Holding</button>
+        <button class="small" id="add-watch">+ Watchlist</button>
+        <button class="small primary" id="save-portfolio">Save</button>
+      </div>
+    </div>
+    <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.06em;">Holdings</h3>
+    <table id="holdings">
+      <thead><tr><th>Ticker</th><th>Shares</th><th>Cost basis</th><th>Thesis</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <h3 class="muted" style="font-size:12px; text-transform:uppercase; letter-spacing:.06em; margin-top:18px;">Watchlist</h3>
+    <table id="watchlist">
+      <thead><tr><th>Ticker</th><th>Reason</th><th>Target price</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const api = (path, opts) => fetch(path, opts).then(async r => {
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+});
+let toastTimer;
+function toast(msg, isError = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.style.borderColor = isError ? "var(--danger)" : "var(--border)";
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3200);
+}
+
+// ---- Status ---------------------------------------------------------------
+function badge(ready, okText, badText) {
+  return ready ? `<span class="badge ok">${okText}</span>` : `<span class="badge bad">${badText}</span>`;
+}
+async function loadStatus() {
+  try {
+    const s = await api("/api/status");
+    const ollama = s.ollama_reachable
+      ? `<span class="badge ok">reachable</span>`
+      : `<span class="badge bad">offline</span>`;
+    $("#status-body").innerHTML = `
+      <div class="row"><span class="k">Detected RAM</span><span class="v">${s.ram_gb ?? "?"} GiB · ${s.tier}</span></div>
+      <div class="row"><span class="k">Fast model</span><span class="v">${s.fast_model} ${badge(s.fast_model_ready, "ready", "missing")}</span></div>
+      <div class="row"><span class="k">Synthesis model</span><span class="v">${s.synthesis_model} ${badge(s.synthesis_model_ready, "ready", "missing")}</span></div>
+      <div class="row"><span class="k">Tier-2 provider</span><span class="v">${s.provider === "ollama" ? "local (free)" : "Claude"}</span></div>
+      <div class="row"><span class="k">Ollama</span><span class="v">${ollama}</span></div>
+      <div class="row"><span class="k">Alerts (7d)</span><span class="v">${s.alerts_last_7d ?? "–"}</span></div>`;
+  } catch (e) { $("#status-body").innerHTML = `<span class="badge bad">${e.message}</span>`; }
+}
+
+// ---- Alerts ---------------------------------------------------------------
+async function loadAlerts() {
+  try {
+    const alerts = await api("/api/alerts?hours=168");
+    if (!alerts.length) { $("#alerts-body").innerHTML = `<span class="muted">No alerts in the last 7 days.</span>`; return; }
+    $("#alerts-body").innerHTML = alerts.slice(0, 25).map(a => `
+      <div class="alert">
+        <div><strong>${a.ticker || ""}</strong> <span class="pri-${(a.priority||"").toLowerCase()}">${a.alert_type}</span></div>
+        <div>${a.message}</div>
+        <div class="meta">${a.sent_at ? new Date(a.sent_at).toLocaleString() : ""} · ${a.priority}</div>
+      </div>`).join("");
+  } catch (e) { $("#alerts-body").innerHTML = `<span class="badge bad">${e.message}</span>`; }
+}
+
+// ---- Portfolio ------------------------------------------------------------
+function holdingRow(h = {}) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input class="t-ticker" value="${h.ticker || ""}" placeholder="AAPL" maxlength="5"></td>
+    <td class="num"><input class="t-shares" value="${h.shares ?? ""}" placeholder="10"></td>
+    <td class="num"><input class="t-cost" value="${h.cost_basis ?? ""}" placeholder="165.00"></td>
+    <td><input class="t-thesis" value="${(h.thesis || "").replace(/"/g, "&quot;")}" placeholder="(optional)"></td>
+    <td><button class="small del">✕</button></td>`;
+  tr.querySelector(".del").onclick = () => tr.remove();
+  return tr;
+}
+function watchRow(w = {}) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input class="t-ticker" value="${w.ticker || ""}" placeholder="GOOGL" maxlength="5"></td>
+    <td><input class="t-reason" value="${(w.reason || "").replace(/"/g, "&quot;")}" placeholder="(optional)"></td>
+    <td class="num"><input class="t-target" value="${w.target_price ?? ""}" placeholder="(optional)"></td>
+    <td><button class="small del">✕</button></td>`;
+  tr.querySelector(".del").onclick = () => tr.remove();
+  return tr;
+}
+async function loadPortfolio() {
+  try {
+    const p = await api("/api/portfolio");
+    const hb = $("#holdings tbody"); hb.innerHTML = "";
+    (p.holdings || []).forEach(h => hb.appendChild(holdingRow(h)));
+    const wb = $("#watchlist tbody"); wb.innerHTML = "";
+    (p.watchlist || []).forEach(w => wb.appendChild(watchRow(w)));
+  } catch (e) { toast(e.message, true); }
+}
+function collectPortfolio() {
+  const holdings = [...document.querySelectorAll("#holdings tbody tr")].map(tr => {
+    const ticker = $(".t-ticker", tr).value.trim().toUpperCase();
+    if (!ticker) return null;
+    const o = { ticker, shares: Number($(".t-shares", tr).value), cost_basis: Number($(".t-cost", tr).value) };
+    const thesis = $(".t-thesis", tr).value.trim(); if (thesis) o.thesis = thesis;
+    return o;
+  }).filter(Boolean);
+  const watchlist = [...document.querySelectorAll("#watchlist tbody tr")].map(tr => {
+    const ticker = $(".t-ticker", tr).value.trim().toUpperCase();
+    if (!ticker) return null;
+    const o = { ticker };
+    const reason = $(".t-reason", tr).value.trim(); if (reason) o.reason = reason;
+    const tgt = $(".t-target", tr).value.trim(); if (tgt) o.target_price = Number(tgt);
+    return o;
+  }).filter(Boolean);
+  return { holdings, watchlist };
+}
+async function savePortfolio() {
+  try {
+    await api("/api/portfolio", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectPortfolio()),
+    });
+    toast("Portfolio saved ✓");
+    loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- Runs -----------------------------------------------------------------
+let pollTimer;
+function setRunningUI(running) {
+  document.querySelectorAll("[data-run]").forEach(b => b.disabled = running);
+}
+async function pollRun() {
+  try {
+    const s = await api("/api/run");
+    if (s.status === "running") {
+      $("#run-status").textContent = `running ${s.run_type}…`;
+      setRunningUI(true);
+      pollTimer = setTimeout(pollRun, 1500);
+    } else {
+      setRunningUI(false);
+      if (s.status === "done") { $("#run-status").textContent = `last run: ${s.run_type} ✓`; toast(`Run complete: ${s.run_type}`); loadAlerts(); loadStatus(); }
+      else if (s.status === "error") { $("#run-status").textContent = `last run failed`; toast(`Run failed: ${s.error}`, true); }
+      else { $("#run-status").textContent = ""; }
+    }
+  } catch (e) { setRunningUI(false); }
+}
+async function triggerRun(type) {
+  try {
+    await api("/api/run", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type }),
+    });
+    toast(`Started ${type} run`);
+    clearTimeout(pollTimer); pollRun();
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---- Wire up --------------------------------------------------------------
+document.querySelectorAll("[data-run]").forEach(b => b.onclick = () => triggerRun(b.dataset.run));
+$("#add-holding").onclick = () => $("#holdings tbody").appendChild(holdingRow());
+$("#add-watch").onclick = () => $("#watchlist tbody").appendChild(watchRow());
+$("#save-portfolio").onclick = savePortfolio;
+
+loadStatus(); loadAlerts(); loadPortfolio(); pollRun();
+</script>
+</body>
+</html>

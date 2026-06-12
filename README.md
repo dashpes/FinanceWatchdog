@@ -12,6 +12,7 @@ A personal investment monitoring system that tracks your portfolio, collects mar
 - **ETF Holdings**: Track changes in ETF compositions
 - **AI Analysis**: Local LLM (Ollama) for everything by default — news relevance scoring *and* weekly synthesis / research reports — so it runs **completely free**. Model selection is auto-detected from your machine's RAM (or pin your own). Claude API is an optional, opt-in upgrade for higher-quality synthesis.
 - **Flexible Notifications**: Console logging (Slack/email ready to add)
+- **Web Dashboard**: Optional local browser UI to view status/alerts, edit your portfolio, and trigger runs — `investment-monitor --serve`
 
 ## Quick Start
 
@@ -95,6 +96,26 @@ investment-monitor --dry-run
 # Diagnose AI setup: detected RAM, chosen models, and Ollama status
 investment-monitor --doctor
 ```
+
+## Web Dashboard (GUI)
+
+Prefer a UI? Launch the local web dashboard — it runs in your browser, works the
+same on macOS/Windows/Linux, and needs no app install or code signing:
+
+```bash
+investment-monitor --serve            # then open http://127.0.0.1:8000
+# custom host/port:
+investment-monitor --serve --host 0.0.0.0 --port 8080
+```
+
+From the dashboard you can:
+- See system/AI status (detected RAM, chosen models, Ollama reachability, alert counts)
+- View recent alerts
+- Edit your portfolio (holdings + watchlist) and save it
+- Trigger a **regular**, **daily digest**, or **weekly synthesis** run and watch it complete
+
+Requires the `dashboard` extra (the one-command installer includes it; for manual
+installs use `pip install -e ".[dashboard]"`).
 
 ## API Requirements & Estimated Costs
 

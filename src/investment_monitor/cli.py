@@ -121,6 +121,25 @@ Cron examples:
     )
 
     parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Launch the local web dashboard (browser UI) instead of a one-off run",
+    )
+
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host/interface for --serve (default: 127.0.0.1, localhost only)",
+    )
+
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for --serve (default: 8000)",
+    )
+
+    parser.add_argument(
         "--yes",
         "-y",
         action="store_true",
@@ -157,6 +176,24 @@ def main(argv: list[str] | None = None) -> int:
         from investment_monitor.setup_wizard import run_setup
 
         return run_setup(assume_yes=args.yes)
+
+    # Launch the web dashboard
+    if args.serve:
+        try:
+            from investment_monitor.web import serve
+        except ImportError:
+            print(
+                "The web dashboard needs extra packages. Install them with:\n"
+                "    pip install -e '.[dashboard]'",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            serve(host=args.host, port=args.port)
+            return 0
+        except KeyboardInterrupt:
+            print("\nDashboard stopped")
+            return 0
 
     # Handle diagnostics
     if args.doctor:

@@ -77,3 +77,38 @@ class Portfolio(BaseModel):
         with open(path) as f:
             data = yaml.safe_load(f) or {}
         return cls(**data)
+
+    def to_dict(self) -> dict:
+        """Serialize to a plain, YAML-friendly dict (no computed fields/Decimals).
+
+        Optional empty fields (thesis, account, reason, target_price) are omitted
+        to keep the written file clean.
+        """
+        holdings = []
+        for h in self.holdings:
+            entry: dict = {
+                "ticker": h.ticker,
+                "shares": float(h.shares),
+                "cost_basis": float(h.cost_basis),
+            }
+            if h.thesis:
+                entry["thesis"] = h.thesis
+            if h.account:
+                entry["account"] = h.account
+            holdings.append(entry)
+
+        watchlist = []
+        for w in self.watchlist:
+            entry = {"ticker": w.ticker}
+            if w.reason:
+                entry["reason"] = w.reason
+            if w.target_price is not None:
+                entry["target_price"] = float(w.target_price)
+            watchlist.append(entry)
+
+        return {"holdings": holdings, "watchlist": watchlist}
+
+    def to_yaml(self, path: Path) -> None:
+        """Write the portfolio to a YAML file (counterpart to from_yaml)."""
+        with open(path, "w") as f:
+            yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)

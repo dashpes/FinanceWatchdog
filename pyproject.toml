@@ -51,6 +51,7 @@ investment-research = "investment_monitor.research_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_monitor"]
+artifacts = ["**/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
