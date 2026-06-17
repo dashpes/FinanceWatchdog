@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Investment Robo Advisor Rebalance (weekly)
+
+[Timer]
+# Weekly, shortly after the US market opens on Monday. OnCalendar uses the
+# server's local time — set the host timezone to America/New_York (or adjust
+# this time) so it fires ~09:35 ET. For a daily cadence use: Mon-Fri 09:35:00
+OnCalendar=Mon *-*-* 09:35:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

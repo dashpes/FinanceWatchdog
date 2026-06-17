@@ -61,6 +61,15 @@ from .research_operations import (
     save_score,
     save_simulation_result,
 )
+from .robo_models import RoboOrder, RoboRun
+from .robo_operations import (
+    count_gate_accepted_orders_today,
+    finalize_robo_run,
+    get_recent_robo_runs,
+    get_robo_orders_for_run,
+    save_robo_order,
+    save_robo_run,
+)
 
 __all__ = [
     # Database
@@ -128,4 +137,14 @@ __all__ = [
     "save_simulation_result",
     "get_simulation_results",
     "get_high_scoring_candidates",
+    # Robo advisor models
+    "RoboRun",
+    "RoboOrder",
+    # Robo advisor operations
+    "save_robo_run",
+    "finalize_robo_run",
+    "save_robo_order",
+    "get_recent_robo_runs",
+    "get_robo_orders_for_run",
+    "count_gate_accepted_orders_today",
 ]

@@ -1,0 +1,50 @@
+# Robo advisor configuration (non-secret).
+# Copy to config/robo.yaml and edit. The Public.com API token is a SECRET and
+# goes in .env (PUBLIC_API_TOKEN), never here.
+#
+# SAFETY: this manages a real, cash-only Public.com account. Review every value
+# below before your first live run, and keep dry_run: true until you have watched
+# a full week of simulated runs. There is NO Public.com paper-trading sandbox —
+# when dry_run is false, orders are real money.
+
+# Target portfolio weights. Must sum to 1.0. "CASH" is a pseudo-symbol meaning
+# "leave this fraction uninvested".
+target_allocation:
+  VOO: 0.50    # Vanguard S&P 500 ETF
+  SCHD: 0.30   # Schwab US Dividend Equity ETF
+  CASH: 0.20   # leave 20% in cash
+
+# Only trade a holding when it drifts more than this fraction from its target.
+rebalance_threshold: 0.05
+
+# Symbols the guardrail gate will allow trading. If omitted, defaults to the
+# non-CASH symbols in target_allocation above.
+allowlist:
+  - VOO
+  - SCHD
+
+# Rate / size caps enforced deterministically by the guardrail gate.
+caps:
+  max_order_pct: 0.25       # max single-order notional as a fraction of portfolio value
+  max_orders_per_run: 5     # max orders placed in one rebalance run
+  max_orders_per_day: 10    # max orders placed across all runs in a calendar day
+  fee_buffer: 0.01          # reserve 1% of order cost for fees/slippage in affordability checks
+
+# Simulate the full pipeline and place NO real orders when true. Keep true until
+# you have reviewed several dry runs. The ROBO_FORCE_DRY_RUN env kill-switch must
+# ALSO be false for any live order to be placed.
+dry_run: true
+
+# Consult the local Ollama LLM for trade proposals. Its numeric output is always
+# re-checked by the deterministic gate, so this never affects safety — only the
+# proposal quality. If false, the rebalance is computed purely deterministically.
+use_llm: true
+
+# Optional: override the Ollama model just for the robo advisor. A tool-calling /
+# JSON-capable instruct model (e.g. qwen2.5, llama3.1, mistral) is recommended over
+# the default phi3:mini for cleaner JSON proposals. Blank = use OLLAMA model setting.
+ollama_model: ""
+
+# Optional: the specific Public account number to trade. Required only if your
+# token can see more than one account. Blank = use the single/default account.
+account_id: ""

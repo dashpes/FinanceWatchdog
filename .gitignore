@@ -37,6 +37,7 @@ config/*.yaml
 !config/*.yaml.example
 data/*.db
 logs/*.log
+logs/*.jsonl
 
 # OS
 .DS_Store
