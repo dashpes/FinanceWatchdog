@@ -169,8 +169,11 @@ def thesis_run(
     skip_maintenance: bool = typer.Option(
         False, "--skip-maintenance", help="Skip LLM thesis re-eval; just rebalance to conviction"
     ),
+    discover: bool = typer.Option(
+        False, "--discover", help="Run research discovery first to source new candidates"
+    ),
 ) -> None:
-    """Autonomous loop: re-evaluate active theses (LLM), then rebalance to conviction weights.
+    """Autonomous loop: discover -> promote -> re-evaluate theses -> rebalance to conviction.
 
     Forces autonomous mode regardless of robo.yaml. Live trading still requires
     ROBO_FORCE_DRY_RUN=false AND dry_run=false (both off by default), so this is a
@@ -202,6 +205,29 @@ def thesis_run(
         except ImportError:
             synth_llm = None
     evaluator = ThesisEvaluator(synth_llm, auto_cfg)
+
+    # 0. The agent runs its OWN research: discover + score candidates into the funnel.
+    if discover or auto_cfg.autonomy.discover:
+        import asyncio
+
+        from investment_monitor.research.discovery import DiscoveryPipeline
+        from investment_monitor.research_cli import _load_research_config
+
+        research_config = _load_research_config(settings.config_dir)
+        typer.echo("Running research discovery (collect + AI-score the universe)...")
+        with get_session() as session:
+            pipeline = DiscoveryPipeline(
+                session=session,
+                config=settings,
+                research_config=research_config,
+                ollama_model=ModelRouter(settings).get_model("scoring"),
+            )
+            result = asyncio.run(pipeline.run_discovery(dry_run=False))
+        typer.echo(
+            f"Discovery: {result.scored_candidates} scored, "
+            f"{len(result.watchlist_additions)} reached the watchlist "
+            f"({result.duration_seconds:.0f}s)"
+        )
 
     # 1. Autonomous selection: promote eligible discovery candidates to theses.
     if auto_cfg.autonomy.enabled:

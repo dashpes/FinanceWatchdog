@@ -140,6 +140,10 @@ class AutonomyConfig(BaseModel):
     """
 
     enabled: bool = False
+    # Run the research discovery pipeline (find + score candidates) at the start of
+    # each autonomous run, so the agent sources its OWN universe rather than relying
+    # on discovery being run separately. Heavy (LLM-scores the universe) — off by default.
+    discover: bool = False
     score_floor: float = Field(default=75.0, ge=0, le=100)        # composite score to promote
     max_promotions_per_run: int = Field(default=3, ge=0)
     # Also require a fresh research report recommending buy/strong_buy (extra key).
