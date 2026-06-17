@@ -97,6 +97,31 @@ def _coerce_conviction(value: Any) -> float | None:
     return max(0.0, min(1.0, c))
 
 
+def _sanitize_invalidation(conditions: dict) -> dict:
+    """Coerce LLM-supplied invalidation thresholds to sane values.
+
+    Drop thresholds are *magnitudes*: the model sometimes emits a negative number
+    (e.g. composite_drop: -15 meaning "a 15-point drop"), which would otherwise trip
+    the condition immediately. Force positive, drop non-positive/garbage values, and
+    keep only clean keyword strings.
+    """
+    out: dict = {}
+    for key in ("composite_drop", "price_drop_pct"):
+        if key in conditions:
+            try:
+                value = abs(float(conditions[key]))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                out[key] = value
+    keywords = conditions.get("keywords")
+    if isinstance(keywords, list):
+        clean = [str(k).strip() for k in keywords if str(k).strip()]
+        if clean:
+            out["keywords"] = clean
+    return out
+
+
 def parse_thesis_response(text: str) -> ThesisUpdate | None:
     """Parse an LLM thesis response into a ThesisUpdate, or None if unusable (pure)."""
     obj = _extract_json_object(text)
@@ -109,7 +134,7 @@ def parse_thesis_response(text: str) -> ThesisUpdate | None:
     if not narrative:
         return None
     inv = obj.get("invalidation_conditions")
-    inv = inv if isinstance(inv, dict) else {}
+    inv = _sanitize_invalidation(inv if isinstance(inv, dict) else {})
     return ThesisUpdate(narrative=narrative, conviction=conviction,
                         invalidation_conditions=inv, raw=obj)
 

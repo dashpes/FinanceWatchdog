@@ -328,6 +328,25 @@ def test_parse_thesis_response_pure():
     assert parse_thesis_response('{"conviction": 0.5}') is None  # missing narrative
 
 
+def test_parse_thesis_sanitizes_invalidation():
+    # NEGATIVE drop magnitudes (a common LLM mistake) are coerced positive, so a
+    # fresh thesis isn't invalidated on the spot.
+    u = parse_thesis_response(
+        '{"narrative":"x","conviction":0.7,"invalidation_conditions":'
+        '{"composite_drop":-15,"price_drop_pct":-20,"keywords":["fraud",""]}}'
+    )
+    assert u.invalidation_conditions["composite_drop"] == 15.0
+    assert u.invalidation_conditions["price_drop_pct"] == 20.0
+    assert u.invalidation_conditions["keywords"] == ["fraud"]
+    # Zero / non-numeric thresholds are dropped entirely.
+    u2 = parse_thesis_response(
+        '{"narrative":"x","conviction":0.7,"invalidation_conditions":'
+        '{"composite_drop":0,"price_drop_pct":"bad"}}'
+    )
+    assert "composite_drop" not in u2.invalidation_conditions
+    assert "price_drop_pct" not in u2.invalidation_conditions
+
+
 class _FakeLLM:
     model = "fake"
 
