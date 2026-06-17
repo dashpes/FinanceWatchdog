@@ -19,6 +19,15 @@ Rejection rules (each returns a stable ``code``):
   * max_orders_per_run   — would exceed the per-run order cap
   * max_orders_per_day   — would exceed the per-day order cap
 
+Autonomous-mode guards (Phase 4; additive — each only fires when its parameter/cap
+is enabled, so rebalance mode is unaffected). Buys are restricted; SELLS are always
+allowed so positions can be exited:
+  * drawdown_breaker     — portfolio drawdown breaker active -> no new buys
+  * no_active_thesis     — buy of a symbol with no live thesis (autonomous mode)
+  * exceeds_per_name_cap — post-buy position value exceeds max_per_name_weight
+  * max_positions        — buy of a new name would exceed the distinct-position cap
+  * exceeds_turnover     — order would exceed the run's gross turnover budget
+
 Conservative-by-construction: sale proceeds are treated as *unsettled* and are
 never credited as available cash within the same run, so no sequence of accepted
 orders can drive settled cash negative.
@@ -74,6 +83,10 @@ def validate(
     price: Decimal | None,
     available_cash: Decimal | None = None,
     held_quantity: Decimal | None = None,
+    active_symbols: set[str] | None = None,
+    halt_buys: bool = False,
+    extra_positions: int = 0,
+    turnover_remaining: Decimal | None = None,
 ) -> GateDecision:
     """Validate a single proposed order. Pure; returns a :class:`GateDecision`.
 
@@ -101,6 +114,13 @@ def validate(
             "account is not a cash account or reports margin/borrowing capability",
         )
 
+    # 1b. Drawdown circuit-breaker (structural): when tripped, halt all new BUYs.
+    # Sells are still allowed so the portfolio can de-risk.
+    if halt_buys and order.side is OrderSide.BUY:
+        return GateDecision.reject(
+            order, "drawdown_breaker", "portfolio drawdown breaker active: new buys halted",
+        )
+
     # 2. No forbidden order shapes (options / crypto / margin / leverage / short / stop).
     bad_field = _forbidden_field(order)
     if bad_field is not None:
@@ -126,6 +146,18 @@ def validate(
     if order.symbol not in config.allowlist:
         return GateDecision.reject(
             order, "symbol_not_allowed", f"{order.symbol} is not on the allowlist",
+        )
+
+    # 5b. Autonomous mode: a BUY requires a live thesis for the symbol. ``active_symbols``
+    # is None in rebalance mode (check skipped). Sells are always allowed (exit path).
+    if (
+        order.side is OrderSide.BUY
+        and active_symbols is not None
+        and order.symbol not in active_symbols
+    ):
+        return GateDecision.reject(
+            order, "no_active_thesis",
+            f"no active thesis for {order.symbol}; buys require one in autonomous mode",
         )
 
     # Need a usable reference price to size/validate quantity orders. For notional
@@ -180,6 +212,42 @@ def validate(
             f"of portfolio ({max_notional})",
         )
 
+    # 8b. Concentration + position-count guards on BUYS (disabled by permissive defaults).
+    if order.side is OrderSide.BUY:
+        if config.caps.max_per_name_weight < 1.0:
+            pos = account_state.get_position(order.symbol)
+            held_value = pos.market_value if pos else Decimal("0")
+            cap_value = Decimal(str(config.caps.max_per_name_weight)) * account_state.total_value
+            if held_value + gross_cost > cap_value:
+                return GateDecision.reject(
+                    order, "exceeds_per_name_cap",
+                    f"{order.symbol} post-buy value {held_value + gross_cost} exceeds "
+                    f"{config.caps.max_per_name_weight:.0%} cap ({cap_value})",
+                )
+        if (
+            config.caps.max_positions > 0
+            and account_state.get_position(order.symbol) is None
+            and len(account_state.positions) + extra_positions >= config.caps.max_positions
+        ):
+            return GateDecision.reject(
+                order, "max_positions",
+                f"buying a new name would exceed the position cap "
+                f"({config.caps.max_positions})",
+            )
+
+    # 8c. Gross turnover budget for the run. BUY-only (like the other guards): a SELL
+    # must never be blocked, so the portfolio can always de-risk/exit.
+    if (
+        order.side is OrderSide.BUY
+        and turnover_remaining is not None
+        and gross_cost > turnover_remaining
+    ):
+        return GateDecision.reject(
+            order, "exceeds_turnover",
+            f"order notional {gross_cost} exceeds remaining turnover budget "
+            f"{turnover_remaining}",
+        )
+
     # 9. Per-run and per-day rate caps.
     if counters.orders_this_run >= config.caps.max_orders_per_run:
         return GateDecision.reject(
@@ -202,18 +270,31 @@ def validate_orders(
     prices: dict[str, Decimal],
     *,
     orders_today: int = 0,
+    active_symbols: set[str] | None = None,
+    halt_buys: bool = False,
 ) -> list[GateDecision]:
     """Validate a batch of orders for one run, threading shared limits safely.
 
     Accepted *buys* decrement the cash available to later orders (sale proceeds are
     treated as unsettled and never re-credited). Accepted *sells* decrement the
-    shares available to later sells of the same symbol. Per-run and per-day caps
-    advance only on acceptance.
+    shares available to later sells of the same symbol. Per-run/per-day caps and the
+    gross-turnover budget advance only on acceptance; new distinct positions opened
+    earlier in the run count against the position cap for later orders.
+
+    ``active_symbols`` (autonomous mode) and ``halt_buys`` (drawdown breaker) are
+    None/False in rebalance mode, leaving the additive guards inert.
     """
     decisions: list[GateDecision] = []
     available_cash = account_state.settled_cash
     held: dict[str, Decimal] = {p.symbol: p.quantity for p in account_state.positions}
+    held_symbols = set(held)
     counters = RunCounters(orders_this_run=0, orders_today=orders_today)
+    turnover_remaining = (
+        Decimal(str(config.caps.max_turnover_pct)) * account_state.total_value
+        if config.caps.max_turnover_pct > 0
+        else None
+    )
+    new_names: set[str] = set()
 
     for order in orders:
         price = prices.get(order.symbol)
@@ -225,6 +306,10 @@ def validate_orders(
             price=price,
             available_cash=available_cash,
             held_quantity=held.get(order.symbol, Decimal("0")),
+            active_symbols=active_symbols,
+            halt_buys=halt_buys,
+            extra_positions=len(new_names),
+            turnover_remaining=turnover_remaining,
         )
         decisions.append(decision)
         if decision.accepted:
@@ -232,9 +317,16 @@ def validate_orders(
                 orders_this_run=counters.orders_this_run + 1,
                 orders_today=counters.orders_today + 1,
             )
+            gross = order.estimated_cost(price or Decimal("0"))
             if order.side is OrderSide.BUY:
+                # Only buys consume the turnover budget (sells are never blocked but
+                # still reduce nothing the buyer relies on).
+                if turnover_remaining is not None:
+                    turnover_remaining -= gross
                 fee_multiplier = Decimal("1") + Decimal(str(config.caps.fee_buffer))
-                available_cash -= order.estimated_cost(price or Decimal("0")) * fee_multiplier
+                available_cash -= gross * fee_multiplier
+                if order.symbol not in held_symbols:
+                    new_names.add(order.symbol)
             else:
                 sell_shares = (
                     order.quantity

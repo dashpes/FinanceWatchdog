@@ -29,6 +29,22 @@ caps:
   max_orders_per_run: 5     # max orders placed in one rebalance run
   max_orders_per_day: 10    # max orders placed across all runs in a calendar day
   fee_buffer: 0.01          # reserve 1% of order cost for fees/slippage in affordability checks
+  # Autonomous-mode safety guards (Phase 4). Permissive defaults below = disabled,
+  # so rebalance mode is unchanged. Recommended values for autonomous mode in comments.
+  max_positions: 0          # 0 = unlimited; autonomous: e.g. 20 distinct holdings max
+  max_per_name_weight: 1.0  # 1.0 = no cap; autonomous: e.g. 0.15 (15% of portfolio per name)
+  max_turnover_pct: 0.0     # 0 = unlimited; autonomous: e.g. 0.5 (gross traded value per run)
+  max_drawdown_pct: 0.0     # 0 = breaker off; autonomous: e.g. 25 (halt buys when down 25% from peak)
+
+# Operating mode (Phase 3).
+#   "rebalance"  = drift toward the fixed target_allocation above (default; exactly
+#                  the original behavior).
+#   "autonomous" = ignore target_allocation and instead size positions from the
+#                  thesis store's conviction (see `sizing` below). The tradeable
+#                  universe becomes the set of names with a live thesis (plus any
+#                  current holdings, so positions can always be exited). The
+#                  guardrail gate and dry-run safety are unchanged in either mode.
+mode: rebalance
 
 # Event-driven signals (Phase 2). When enabled, the advisor reacts to recent
 # events — insider Form 4 buys/sells, congressional cluster trades, volume spikes,
@@ -62,6 +78,30 @@ signals:
   earnings_caution_days: 3  # earnings within N days flags CAUTION (don't add into it)
   # RISK BOUND: the most a single name's target weight may move on events.
   max_event_tilt: 0.05      # +/- 5 percentage points
+
+# Risk-adjusted conviction sizing (Phase 3, used only when mode: autonomous).
+# Deterministic math (never an LLM): conviction + Monte-Carlo risk -> a bounded
+# target weight. The LLM only sets conviction; the gate still re-checks every order.
+sizing:
+  max_position_weight: 0.15       # hard ceiling on any single name's weight
+  kelly_fraction: 0.25            # fractional-Kelly multiplier on the Sharpe signal
+  cvar_aversion: 2.0              # how hard to shrink size as 90d tail loss (CVaR) grows
+  risk_free: 0.04                 # annualized risk-free rate in the Sharpe numerator
+  min_vol: 0.05                   # volatility floor (stops near-zero-vol blowups)
+  no_sim_weight_per_conviction: 0.05   # weight = conviction * this when no simulation exists
+  conviction_half_life_days: 30.0 # conviction decays toward the floor with this half-life
+  conviction_floor: 0.5           # decay target (neutral) absent fresh confirming evidence
+  min_cash_weight: 0.05           # always keep at least this fraction in cash
+
+# Autonomous stock selection (Phase 4, used only when mode: autonomous). When
+# enabled, names from the research discovery funnel whose composite score clears
+# score_floor are promoted to active theses automatically (no human approval), and
+# then sized/traded through the gate like any other thesis. Disabled by default.
+autonomy:
+  enabled: false                  # master switch for self-selection
+  score_floor: 75.0               # composite score (0-100) required to promote a name
+  max_promotions_per_run: 3       # cap new names added per run (bias toward maintaining)
+  require_buy_recommendation: false  # also require a buy/strong_buy research report
 
 # Simulate the full pipeline and place NO real orders when true. Keep true until
 # you have reviewed several dry runs. The ROBO_FORCE_DRY_RUN env kill-switch must

@@ -37,6 +37,8 @@ from investment_monitor.storage import (
     RoboRun,
     count_gate_accepted_orders_today,
     finalize_robo_run,
+    get_active_symbols,
+    get_recent_robo_runs,
     get_session,
     init_db,
     save_robo_order,
@@ -174,9 +176,28 @@ def rebalance_run(
                 logger.warning("Signal fetch failed ({e}); proceeding without signals", e=exc)
                 snapshot = None
 
-        orders, source = proposer.propose(account, signals=snapshot)
+        orders, source = proposer.propose(
+            account, signals=snapshot, session=session, account_id=account.account_id or None
+        )
         for order in orders:
             audit.proposal(order)
+
+        # In autonomous mode the tradeable universe is the set of names with a live
+        # thesis, plus anything currently held (so positions can always be exited).
+        # The gate then enforces it for free via its existing allowlist check, and
+        # the additive `no_active_thesis` guard restricts BUYs to thesis names.
+        gate_config = config
+        active_symbols: set[str] | None = None
+        if config.mode == "autonomous":
+            active_symbols = get_active_symbols(session, account.account_id or None)
+            held = {p.symbol for p in account.positions}
+            gate_config = config.model_copy(update={"allowlist": sorted(active_symbols | held)})
+
+        # Drawdown circuit-breaker: halt new buys when the portfolio is down beyond
+        # the configured limit vs its prior peak (sells still allowed). Off by default.
+        halt_buys = _drawdown_halt(session, config, account.total_value, account.account_id)
+        if halt_buys:
+            logger.warning("Drawdown circuit-breaker active: halting new buys this run")
 
         run_row = RoboRun(
             run_id=run_id, dry_run=dry_run, account_id=account.account_id, source=source,
@@ -187,7 +208,10 @@ def rebalance_run(
 
         # --- 6. Guardrail gate ---------------------------------------------------
         orders_today = count_gate_accepted_orders_today(session)
-        decisions = validate_orders(orders, account, config, prices, orders_today=orders_today)
+        decisions = validate_orders(
+            orders, account, gate_config, prices, orders_today=orders_today,
+            active_symbols=active_symbols, halt_buys=halt_buys,
+        )
 
         num_accepted = num_rejected = num_placed = 0
         for decision in decisions:
@@ -264,6 +288,35 @@ def rebalance_run(
     )
     logger.info("Rebalance complete: {s}", s=result.summary_line())
     return result
+
+
+def _drawdown_halt(
+    session, config: RoboConfig, current_total: Decimal, account_id: str = ""
+) -> bool:
+    """True if the portfolio is down beyond ``max_drawdown_pct`` vs its prior peak.
+
+    Peak total value is read from recorded run history (a self-contained high-water
+    mark), scoped to this account so one account can't pin another's drawdown.
+    Disabled (returns False) when ``max_drawdown_pct`` is 0. Fail-open by design
+    (never blocks sells; buys proceed on a read error rather than stall).
+    """
+    if config.caps.max_drawdown_pct <= 0 or current_total <= 0:
+        return False
+    try:
+        runs = get_recent_robo_runs(session, limit=200)
+    except Exception as exc:  # noqa: BLE001 - history read must never break a run
+        logger.warning("Drawdown history read failed ({e}); breaker not evaluated", e=exc)
+        return False
+    peaks = [
+        Decimal(str(r.total_value))
+        for r in runs
+        if r.total_value and (not account_id or r.account_id == account_id)
+    ]
+    peak = max([current_total, *peaks])
+    if peak <= 0:
+        return False
+    drawdown_pct = float((peak - current_total) / peak * 100)
+    return drawdown_pct >= config.caps.max_drawdown_pct
 
 
 def _utcnow():

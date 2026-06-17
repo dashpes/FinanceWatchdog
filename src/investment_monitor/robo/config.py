@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -28,6 +29,13 @@ class RoboCaps(BaseModel):
     max_orders_per_day: int = Field(default=10, ge=0)
     # Fraction of an order's cost reserved for fees/slippage when checking affordability.
     fee_buffer: float = Field(default=0.01, ge=0, lt=1.0)
+
+    # --- autonomous-mode safety guards (Phase 4). Permissive defaults = disabled,
+    # so rebalance mode and existing behavior are unchanged unless these are set. ---
+    max_positions: int = Field(default=0, ge=0)              # 0 = unlimited distinct holdings
+    max_per_name_weight: float = Field(default=1.0, gt=0, le=1.0)  # 1.0 = no concentration cap
+    max_turnover_pct: float = Field(default=0.0, ge=0)       # 0 = unlimited gross turnover per run
+    max_drawdown_pct: float = Field(default=0.0, ge=0)       # 0 = drawdown circuit-breaker disabled
 
 
 # Event-signal categories the proposer understands. Weights must key into this set.
@@ -94,6 +102,50 @@ class SignalConfig(BaseModel):
         return v
 
 
+class SizingConfig(BaseModel):
+    """Risk-adjusted conviction -> target-weight sizing (Phase 3, autonomous mode).
+
+    Pure deterministic sizing (see ``robo/sizing.py``). The LLM sets *conviction*;
+    this config governs how conviction + Monte-Carlo risk metrics become a bounded
+    target weight. The guardrail gate still re-checks every resulting order.
+    """
+
+    # Hard ceiling on any single name's target weight.
+    max_position_weight: float = Field(default=0.15, gt=0, le=1.0)
+    # Fractional-Kelly multiplier on the risk-adjusted (Sharpe) signal.
+    kelly_fraction: float = Field(default=0.25, gt=0, le=1.0)
+    # How hard to shrink size as 90d CVaR (tail loss) grows.
+    cvar_aversion: float = Field(default=2.0, ge=0)
+    # Annualized risk-free rate used in the Sharpe numerator.
+    risk_free: float = Field(default=0.04, ge=0, le=1.0)
+    # Volatility floor so a near-zero-vol sim can't explode the Sharpe ratio.
+    min_vol: float = Field(default=0.05, gt=0)
+    # When no simulation exists, weight = conviction * this (conservative).
+    no_sim_weight_per_conviction: float = Field(default=0.05, ge=0, le=1.0)
+    # Conviction time-decay: decays toward `conviction_floor` with this half-life,
+    # reset whenever a thesis is re-evaluated. Prevents stale max-conviction.
+    conviction_half_life_days: float = Field(default=30.0, gt=0)
+    conviction_floor: float = Field(default=0.5, ge=0, le=1.0)
+    # Always leave at least this fraction of the portfolio in cash (autonomous mode).
+    min_cash_weight: float = Field(default=0.05, ge=0, lt=1.0)
+
+
+class AutonomyConfig(BaseModel):
+    """Autonomous stock selection (Phase 4): promote discovery-funnel names to theses.
+
+    'Fully auto behind a score floor': a candidate whose composite score clears
+    ``score_floor`` is promoted to an active thesis automatically (no human in the
+    loop), capped at ``max_promotions_per_run`` per run and biased toward maintaining
+    existing theses over churning into new names. Disabled by default.
+    """
+
+    enabled: bool = False
+    score_floor: float = Field(default=75.0, ge=0, le=100)        # composite score to promote
+    max_promotions_per_run: int = Field(default=3, ge=0)
+    # Also require a fresh research report recommending buy/strong_buy (extra key).
+    require_buy_recommendation: bool = False
+
+
 class RoboConfig(BaseModel):
     """Validated robo-advisor configuration (from ``config/robo.yaml``)."""
 
@@ -106,8 +158,19 @@ class RoboConfig(BaseModel):
 
     caps: RoboCaps = Field(default_factory=RoboCaps)
 
+    # Operating mode. "rebalance" (default) = fixed target_allocation, exactly
+    # today's behavior. "autonomous" = conviction-driven weights from the thesis
+    # store. The mode never affects dry-run/gate safety.
+    mode: Literal["rebalance", "autonomous"] = "rebalance"
+
     # Event-driven signal settings (Phase 2). Disabled by default.
     signals: SignalConfig = Field(default_factory=SignalConfig)
+
+    # Risk-adjusted conviction sizing (Phase 3, used in autonomous mode).
+    sizing: SizingConfig = Field(default_factory=SizingConfig)
+
+    # Autonomous stock selection from the discovery funnel (Phase 4). Disabled by default.
+    autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
 
     # Safety: simulate everything and place no real orders when True. Default True.
     dry_run: bool = True

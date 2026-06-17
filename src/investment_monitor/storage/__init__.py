@@ -70,6 +70,24 @@ from .robo_operations import (
     save_robo_order,
     save_robo_run,
 )
+from .memory_models import MemoryEmbedding
+from .memory_operations import (
+    cosine_similarity,
+    is_duplicate,
+    save_embedding,
+    search_similar,
+)
+from .thesis_models import LIVE_THESIS_STATUSES, Thesis, ThesisStatus
+from .thesis_operations import (
+    get_active_symbols,
+    get_active_theses,
+    get_all_theses,
+    get_thesis,
+    invalidate_thesis,
+    record_conviction_update,
+    save_thesis,
+    set_target_weight,
+)
 
 __all__ = [
     # Database
@@ -147,4 +165,22 @@ __all__ = [
     "get_recent_robo_runs",
     "get_robo_orders_for_run",
     "count_gate_accepted_orders_today",
+    # Thesis store (autonomous investor)
+    "Thesis",
+    "ThesisStatus",
+    "LIVE_THESIS_STATUSES",
+    "get_active_theses",
+    "get_all_theses",
+    "get_thesis",
+    "save_thesis",
+    "record_conviction_update",
+    "set_target_weight",
+    "invalidate_thesis",
+    "get_active_symbols",
+    # Semantic memory (Phase 5)
+    "MemoryEmbedding",
+    "save_embedding",
+    "search_similar",
+    "is_duplicate",
+    "cosine_similarity",
 ]

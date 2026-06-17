@@ -162,6 +162,83 @@ def run(
             typer.echo(f"  {o.side.value:<4} {o.symbol:<6} {size:<10} -> {d.code}: {d.reason}")
 
 
+@app.command("thesis-run")
+def thesis_run(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Force simulation (no real orders)"),
+    skip_maintenance: bool = typer.Option(
+        False, "--skip-maintenance", help="Skip LLM thesis re-eval; just rebalance to conviction"
+    ),
+) -> None:
+    """Autonomous loop: re-evaluate active theses (LLM), then rebalance to conviction weights.
+
+    Forces autonomous mode regardless of robo.yaml. Live trading still requires
+    ROBO_FORCE_DRY_RUN=false AND dry_run=false (both off by default), so this is a
+    safe paper-trading loop out of the box.
+    """
+    from investment_monitor.analysis.model_router import ModelRouter
+    from investment_monitor.analysis.thesis_evaluator import (
+        ThesisEvaluator,
+        refresh_target_weights,
+    )
+    from investment_monitor.storage import get_active_theses
+
+    settings = get_settings()
+    cfg = _load_config(config)
+    auto_cfg = cfg if cfg.mode == "autonomous" else cfg.model_copy(update={"mode": "autonomous"})
+    acct = auto_cfg.account_id or None
+
+    init_db(settings.db_path)
+    # Thesis synthesis uses the stronger 'synthesis'-role model (Phase 5 routing).
+    synth_llm = None
+    if auto_cfg.use_llm:
+        try:
+            from investment_monitor.analysis.local_llm import LocalLLM
+
+            synth_llm = LocalLLM(
+                model=ModelRouter(settings).get_model("synthesis"),
+                base_url=settings.ollama_host,
+            )
+        except ImportError:
+            synth_llm = None
+    evaluator = ThesisEvaluator(synth_llm, auto_cfg)
+
+    # 1. Autonomous selection: promote eligible discovery candidates to theses.
+    if auto_cfg.autonomy.enabled:
+        from investment_monitor.robo.promotion import promote_candidates
+
+        with get_session() as session:
+            promoted = promote_candidates(session, auto_cfg, evaluator=evaluator, account_id=acct)
+        if promoted:
+            typer.echo(f"Promoted {len(promoted)} new name(s): {', '.join(promoted)}")
+
+    # 2. Maintain existing theses (deterministic invalidation, then LLM re-eval).
+    if not skip_maintenance:
+        actions = {"invalidated": 0, "updated": 0, "unchanged": 0}
+        with get_session() as session:
+            for thesis in get_active_theses(session, acct):
+                actions[evaluator.evaluate(session, thesis, account_id=acct)] += 1
+        typer.echo(
+            f"Thesis maintenance: {actions['updated']} updated, "
+            f"{actions['invalidated']} invalidated, {actions['unchanged']} unchanged"
+        )
+
+    # 3. Recompute sized target weights from current convictions.
+    with get_session() as session:
+        refresh_target_weights(session, auto_cfg, account_id=acct)
+
+    try:
+        result = rebalance_run(auto_cfg, settings, dry_run_override=(True if dry_run else None))
+    except BrokerError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(result.summary_line())
+    if result.status in ("refused", "failed"):
+        typer.secho(f"{result.status}: {result.message}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command("status")
 def status(
     limit: int = typer.Option(10, "--limit", help="Number of recent runs to show"),

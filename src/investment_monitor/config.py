@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"
 
+    # Per-role model routing (Phase 5). A small/fast model triages; a stronger
+    # model synthesizes theses; a dedicated model produces embeddings. Any role left
+    # blank falls back to ollama_model. Override individual roles in .env, e.g.
+    # MODEL_ROLES__SYNTHESIS=qwen2.5:14b
+    model_roles: dict[str, str] = Field(
+        default_factory=lambda: {
+            "triage": "phi3:mini",
+            "synthesis": "qwen2.5:7b",
+            "scoring": "phi3:mini",
+            "embedding": "nomic-embed-text",
+        }
+    )
+
     # Public.com robo advisor (trading) — secret token from env only
     public_api_token: str = ""
     public_api_base_url: str = ""  # blank = SDK/library default (production)

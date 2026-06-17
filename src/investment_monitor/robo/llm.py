@@ -27,8 +27,11 @@ from investment_monitor.robo.models import (
 )
 from investment_monitor.robo.prompts import PROPOSAL_PROMPT
 from investment_monitor.robo.signals import SignalSnapshot, tilt_targets
+from investment_monitor.robo.sizing import compute_conviction_weights
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from investment_monitor.analysis.local_llm import LocalLLM
 
 # Recognized keys and their aliases. Anything else lands in extra_fields.
@@ -188,24 +191,48 @@ class RoboProposer:
         account_state: AccountState,
         *,
         signals: "SignalSnapshot | None" = None,
+        session: "Session | None" = None,
+        account_id: str | None = None,
     ) -> tuple[list[ProposedOrder], str]:
         """Return (orders, source).
 
-        ``source`` is 'deterministic' / 'llm', with a '+sig' suffix when event
-        signals were active. Backward-compatible: ``signals=None`` reproduces the
-        signal-free behavior exactly (identical orders and prompt).
+        Rebalance mode: 'deterministic' / 'llm' as before (+'+sig' when event
+        signals were active); ``signals=None`` reproduces the signal-free behavior
+        exactly. Autonomous mode: orders are derived DETERMINISTICALLY from the
+        thesis store's conviction-sized weights ('autonomous'[+sig]) — the LLM
+        maintains theses/conviction elsewhere, it does not free-form orders here.
         """
         signals_active = signals is not None and not signals.is_empty
+        autonomous = self._config.mode == "autonomous" and session is not None
 
-        # The deterministic path (also the LLM fallback) tilts its targets on events.
-        det_config = self._config
-        if signals_active:
-            tilted = tilt_targets(
-                self._config.target_allocation, signals, self._config.signals.max_event_tilt
-            )
-            det_config = self._config.model_copy(update={"target_allocation": tilted})
+        # Base target allocation: conviction-driven (autonomous) or fixed (rebalance).
+        if autonomous:
+            base_alloc = compute_conviction_weights(session, self._config, account_id=account_id)
+            # Held names with no live thesis are trimmed to 0 so they get sold.
+            for p in account_state.positions:
+                base_alloc.setdefault(p.symbol, 0.0)
+        else:
+            base_alloc = self._config.target_allocation
+
+        # Events still tilt the base allocation within bounds (gate never sees this).
+        effective_alloc = (
+            tilt_targets(base_alloc, signals, self._config.signals.max_event_tilt)
+            if signals_active else base_alloc
+        )
+
+        base_is_original = (effective_alloc is self._config.target_allocation)
+        det_config = (
+            self._config if base_is_original
+            else self._config.model_copy(update={"target_allocation": effective_alloc})
+        )
         deterministic = generate_candidate_orders(account_state, det_config)
-        det_source = "deterministic+sig" if signals_active else "deterministic"
+
+        base_label = "autonomous" if autonomous else "deterministic"
+        det_source = f"{base_label}+sig" if signals_active else base_label
+
+        # Autonomous mode is conviction-driven: do not consult the LLM for orders.
+        if autonomous:
+            return deterministic, det_source
 
         if not self._config.use_llm or self._llm is None or not self._llm.is_available():
             return deterministic, det_source
