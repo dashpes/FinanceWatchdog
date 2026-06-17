@@ -36,6 +36,11 @@ from investment_monitor.robo.models import (
 )
 
 
+# Public OrderStatus values that mean the order is still working (could fill).
+# Anything else (FILLED, CANCELLED, REJECTED, EXPIRED, REPLACED, ...) is terminal.
+_OPEN_ORDER_STATUSES = {"NEW", "PARTIALLY_FILLED", "PENDING_REPLACE", "PENDING_CANCEL"}
+
+
 class BrokerError(Exception):
     """A recoverable error talking to the broker."""
 
@@ -192,6 +197,24 @@ def account_state_from_raw(
                 price = Decimal("0")
         positions.append(Position(symbol=symbol, quantity=quantity, price=price))
 
+    # In-flight orders: symbols with a still-working order at the broker. Used by the
+    # gate to avoid stacking a new order on top of a queued one.
+    open_order_symbols: list[str] = []
+    raw_orders = _first(portfolio, "orders", default=[]) or []
+    if isinstance(raw_orders, dict):
+        raw_orders = list(raw_orders.values())
+    for ro in raw_orders:
+        od = _as_dict(ro)
+        status = str(_first(od, "status", "orderStatus", "order_status", default="")).upper()
+        if status not in _OPEN_ORDER_STATUSES:
+            continue
+        oinstr = _as_dict(_first(od, "instrument", default={}))
+        osym = str(
+            _first(oinstr, "symbol", default=_first(od, "symbol", "ticker", default=""))
+        ).upper()
+        if osym:
+            open_order_symbols.append(osym)
+
     return AccountState(
         account_id=account_id,
         account_type=account_type,
@@ -199,6 +222,7 @@ def account_state_from_raw(
         has_margin=has_margin,
         settled_cash=settled_cash,
         positions=positions,
+        open_order_symbols=sorted(set(open_order_symbols)),
         raw={"account": account, "portfolio": portfolio},
     )
 

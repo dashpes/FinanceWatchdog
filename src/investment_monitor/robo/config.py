@@ -178,6 +178,9 @@ class RoboConfig(BaseModel):
 
     # Safety: simulate everything and place no real orders when True. Default True.
     dry_run: bool = True
+    # Only PLACE live orders during US market hours (research/maintenance still run
+    # 24/7; off-hours live runs propose + gate but defer placement). Default True.
+    require_market_hours: bool = True
     # Whether to consult the local LLM for proposals (it is always re-checked by code).
     use_llm: bool = True
     # Optional override of which Ollama model to use; falls back to Settings.ollama_model.

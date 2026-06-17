@@ -67,6 +67,9 @@ class AccountState(BaseModel):
     has_margin: bool
     settled_cash: Decimal = Field(..., description="Cash available to spend right now")
     positions: list[Position] = Field(default_factory=list)
+    # Symbols with an in-flight (open/pending) order at the broker. The gate rejects
+    # new orders for these to avoid duplicating queued trades across runs.
+    open_order_symbols: list[str] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict, repr=False)
 
     @property

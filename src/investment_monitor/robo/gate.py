@@ -24,6 +24,7 @@ is enabled, so rebalance mode is unaffected). Buys are restricted; SELLS are alw
 allowed so positions can be exited:
   * drawdown_breaker     — portfolio drawdown breaker active -> no new buys
   * no_active_thesis     — buy of a symbol with no live thesis (autonomous mode)
+  * open_order_exists    — symbol already has an in-flight order at the broker
   * exceeds_per_name_cap — post-buy position value exceeds max_per_name_weight
   * max_positions        — buy of a new name would exceed the distinct-position cap
   * exceeds_turnover     — order would exceed the run's gross turnover budget
@@ -158,6 +159,15 @@ def validate(
         return GateDecision.reject(
             order, "no_active_thesis",
             f"no active thesis for {order.symbol}; buys require one in autonomous mode",
+        )
+
+    # 5c. Don't stack a new order on a symbol that already has an in-flight order at
+    # the broker — prevents duplicate/queued trades across back-to-back runs. Applies
+    # to both sides; inert when open_order_symbols is empty (e.g. dry-run/tests).
+    if order.symbol in account_state.open_order_symbols:
+        return GateDecision.reject(
+            order, "open_order_exists",
+            f"{order.symbol} already has an open order at the broker; skipping to avoid a duplicate",
         )
 
     # Need a usable reference price to size/validate quantity orders. For notional

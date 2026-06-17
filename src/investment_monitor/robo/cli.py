@@ -172,6 +172,9 @@ def thesis_run(
     discover: bool = typer.Option(
         False, "--discover", help="Run research discovery first to source new candidates"
     ),
+    no_trade: bool = typer.Option(
+        False, "--no-trade", help="Research + maintain theses only; skip the rebalance/trading step"
+    ),
 ) -> None:
     """Autonomous loop: discover -> promote -> re-evaluate theses -> rebalance to conviction.
 
@@ -252,6 +255,11 @@ def thesis_run(
     # 3. Recompute sized target weights from current convictions.
     with get_session() as session:
         refresh_target_weights(session, auto_cfg, account_id=acct)
+
+    # 4. Trade — unless this is a research-only run (24/7 schedule uses --no-trade).
+    if no_trade:
+        typer.echo("Research/maintenance complete (--no-trade: skipped the rebalance step).")
+        return
 
     try:
         result = rebalance_run(auto_cfg, settings, dry_run_override=(True if dry_run else None))

@@ -7,10 +7,13 @@ under default/permissive config so rebalance mode is unaffected.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from investment_monitor.robo.config import AutonomyConfig, RoboCaps, RoboConfig
 from investment_monitor.robo.gate import validate, validate_orders
+from investment_monitor.robo.market_hours import is_market_open
 from investment_monitor.robo.models import (
     AccountState,
     OrderSide,
@@ -132,6 +135,36 @@ def test_guards_inert_by_default():
     cfg = _cfg()
     d = validate(_buy("VOO", "10"), _acct("100"), cfg, price=Decimal("500"))
     assert d.accepted
+
+
+def test_open_order_guard_blocks_both_sides():
+    # A symbol with an in-flight order at the broker -> no new order (either side),
+    # to avoid duplicating a queued trade. Other symbols are unaffected.
+    held = [Position(symbol="VOO", quantity=Decimal("1"), price=Decimal("500"))]
+    acct = AccountState(
+        account_id="A", account_type="B", is_cash_account=True, has_margin=False,
+        settled_cash=Decimal("100"), positions=held, open_order_symbols=["VOO"],
+    )
+    cfg = _cfg()
+    assert validate(_buy("VOO", "10"), acct, cfg, price=Decimal("500")).code == "open_order_exists"
+    assert validate(_sell("VOO", "10"), acct, cfg, price=Decimal("500")).code == "open_order_exists"
+    assert validate(_buy("SCHD", "10"), acct, cfg, price=Decimal("80")).accepted  # no open order
+
+
+# --------------------------------------------------------------------------- #
+# Market hours
+# --------------------------------------------------------------------------- #
+def test_is_market_open():
+    et = ZoneInfo("America/New_York")
+    assert is_market_open(datetime(2026, 6, 17, 11, 0, tzinfo=et)) is True   # Wed 11:00 ET
+    assert is_market_open(datetime(2026, 6, 17, 9, 0, tzinfo=et)) is False   # before 9:30
+    assert is_market_open(datetime(2026, 6, 17, 16, 0, tzinfo=et)) is False  # close is exclusive
+    assert is_market_open(datetime(2026, 6, 17, 15, 59, tzinfo=et)) is True
+    assert is_market_open(datetime(2026, 6, 20, 11, 0, tzinfo=et)) is False  # Saturday
+    assert is_market_open(datetime(2026, 6, 17, 11, 0)) is True              # naive -> assumed ET
+    # Pacific 08:00 == 11:00 ET -> open (timezone conversion works).
+    pt = ZoneInfo("America/Los_Angeles")
+    assert is_market_open(datetime(2026, 6, 17, 8, 0, tzinfo=pt)) is True
 
 
 def test_turnover_never_blocks_exit_sell():

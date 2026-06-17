@@ -67,12 +67,14 @@ def make_settings(tmp_path, *, force_dry_run=True) -> Settings:
     )
 
 
-def make_config(*, dry_run=True) -> RoboConfig:
+def make_config(*, dry_run=True, require_market_hours=False) -> RoboConfig:
     return RoboConfig(
         target_allocation={"VOO": 0.5, "SCHD": 0.3, "CASH": 0.2},
         allowlist=["VOO", "SCHD"],
         use_llm=False,  # deterministic path; no Ollama needed
         dry_run=dry_run,
+        # Default off so placement tests are deterministic regardless of wall-clock.
+        require_market_hours=require_market_hours,
         caps=RoboCaps(max_order_pct=0.25, max_orders_per_run=5, max_orders_per_day=10),
     )
 
@@ -133,6 +135,31 @@ def test_env_kill_switch_forces_dry_run_even_if_config_live(tmp_path):
 
     assert result.dry_run is True
     assert broker.place_called == 0
+
+
+def test_live_run_defers_placement_when_market_closed(tmp_path, monkeypatch):
+    # Live + require_market_hours, but market closed -> orders are gate-accepted and
+    # preflighted, yet NOT placed (deferred), so nothing trades off-hours.
+    import investment_monitor.robo.rebalance as reb
+    monkeypatch.setattr(reb, "is_market_open", lambda *a, **k: False)
+    broker = FakeBroker(cash_account("100"), dry_run=False)
+    settings = make_settings(tmp_path, force_dry_run=False)
+    cfg = make_config(dry_run=False, require_market_hours=True)
+    result = reb.rebalance_run(cfg, settings, broker=broker)
+    assert result.dry_run is False
+    assert result.num_accepted == 2
+    assert result.num_placed == 0          # deferred
+    assert broker.place_called == 0        # nothing sent to the broker
+
+
+def test_live_run_places_when_market_open(tmp_path, monkeypatch):
+    import investment_monitor.robo.rebalance as reb
+    monkeypatch.setattr(reb, "is_market_open", lambda *a, **k: True)
+    broker = FakeBroker(cash_account("100"), dry_run=False)
+    settings = make_settings(tmp_path, force_dry_run=False)
+    cfg = make_config(dry_run=False, require_market_hours=True)
+    result = reb.rebalance_run(cfg, settings, broker=broker)
+    assert result.num_placed == 2 and broker.place_called == 2
 
 
 def test_overweight_account_generates_sell(tmp_path):

@@ -30,6 +30,7 @@ from investment_monitor.robo.broker import BrokerError, PublicBroker, SafetyViol
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
+from investment_monitor.robo.market_hours import is_market_open
 from investment_monitor.robo.models import AccountState, GateDecision
 from investment_monitor.robo.signals import fetch_signals
 from investment_monitor.storage import (
@@ -199,6 +200,11 @@ def rebalance_run(
         if halt_buys:
             logger.warning("Drawdown circuit-breaker active: halting new buys this run")
 
+        # Live placement is gated to market hours (research/maintenance ran already).
+        market_open = is_market_open()
+        if not dry_run and config.require_market_hours and not market_open:
+            logger.warning("Market closed: live order placement deferred this run")
+
         run_row = RoboRun(
             run_id=run_id, dry_run=dry_run, account_id=account.account_id, source=source,
             total_value=float(account.total_value), settled_cash=float(account.settled_cash),
@@ -252,6 +258,11 @@ def rebalance_run(
                 order_row.status = "simulated"
                 num_placed += 1
                 audit.order_result(order, simulated=True, placed=False, status="simulated")
+            elif config.require_market_hours and not market_open:
+                # Live, but the market is closed: defer placement (don't queue).
+                order_row.status = "deferred_market_closed"
+                audit.order_result(order, simulated=False, placed=False,
+                                   detail="market closed; placement deferred")
             else:
                 try:
                     placed = broker.place_order(order)

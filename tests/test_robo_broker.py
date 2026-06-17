@@ -96,3 +96,29 @@ def test_total_value_is_cash_plus_positions():
         _portfolio(cash="100", positions=[_position(quantity="0.1", current_value="50", last_price="500")]),
     )
     assert state.total_value == Decimal("150")
+
+
+def _order(symbol="VOO", status="NEW"):
+    return {"order_id": "o1", "instrument": {"symbol": symbol, "type": "EQUITY"}, "status": status}
+
+
+def test_open_order_symbols_extracted_only_for_working_orders():
+    portfolio = _portfolio()
+    portfolio["orders"] = [
+        _order("VOO", "NEW"),                # open
+        _order("MSFT", "PARTIALLY_FILLED"),  # open
+        _order("AAPL", "FILLED"),            # terminal -> excluded
+        _order("GS", "CANCELLED"),           # terminal -> excluded
+        _order("HD", "REJECTED"),            # terminal -> excluded
+    ]
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"}, portfolio
+    )
+    assert state.open_order_symbols == ["MSFT", "VOO"]  # sorted, working orders only
+
+
+def test_no_open_orders_default_empty():
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"}, _portfolio()
+    )
+    assert state.open_order_symbols == []
