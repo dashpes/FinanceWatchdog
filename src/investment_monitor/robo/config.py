@@ -30,6 +30,70 @@ class RoboCaps(BaseModel):
     fee_buffer: float = Field(default=0.01, ge=0, lt=1.0)
 
 
+# Event-signal categories the proposer understands. Weights must key into this set.
+SIGNAL_CATEGORIES = ("insider", "congress", "volume", "news", "earnings")
+
+
+class SignalConfig(BaseModel):
+    """Event-driven signal settings (Phase 2).
+
+    Signals only *inform* proposals — they are NEVER seen by the guardrail gate and
+    can never relax a cap. When ``enabled`` is False the proposer behaves exactly as
+    the pure drift-to-target rebalancer. Event-driven exposure is bounded by
+    ``max_event_tilt``: a holding's effective target weight may move by at most that
+    fraction on events, well under the gate's per-order ``max_order_pct``.
+    """
+
+    # Master switch. OFF by default: behavior is identical to the baseline rebalancer.
+    enabled: bool = False
+
+    # --- lookback windows (per source) ---
+    news_hours: int = Field(default=24, ge=1)
+    insider_days: int = Field(default=30, ge=1)
+    earnings_days_ahead: int = Field(default=14, ge=1)
+    congress_days: int = Field(default=90, ge=1)
+    volume_lookback: int = Field(default=20, ge=5)
+    # Magnitude of an event halves every this-many days (recency decay).
+    recency_half_life_days: float = Field(default=7.0, gt=0)
+
+    # --- per-category relative weight in the net directional score ---
+    weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "insider": 1.0,
+            "congress": 0.5,
+            "volume": 0.4,
+            "news": 0.3,
+            "earnings": 0.6,
+        }
+    )
+
+    # --- detection thresholds (mirror the existing alert rules) ---
+    news_relevance_min: float = Field(default=5.0, ge=0, le=10)  # 1-10 scale
+    insider_buy_min_value: float = Field(default=100_000, ge=0)
+    insider_sell_min_value: float = Field(default=100_000, ge=0)
+    cluster_min_unique: int = Field(default=3, ge=2)
+    volume_spike_multiplier: float = Field(default=2.5, gt=1)
+    # Earnings within this many days flags a holding CAUTION (suppress buying into it).
+    earnings_caution_days: int = Field(default=3, ge=0)
+
+    # --- risk bound: max fraction a name's target weight may move on events ---
+    max_event_tilt: float = Field(default=0.05, ge=0, le=0.25)
+
+    @field_validator("weights")
+    @classmethod
+    def _known_weight_keys(cls, v: dict[str, float]) -> dict[str, float]:
+        unknown = set(v) - set(SIGNAL_CATEGORIES)
+        if unknown:
+            raise ValueError(
+                f"unknown signal weight categories {sorted(unknown)}; "
+                f"valid: {list(SIGNAL_CATEGORIES)}"
+            )
+        for cat, w in v.items():
+            if w < 0:
+                raise ValueError(f"signal weight for {cat} must be >= 0, got {w}")
+        return v
+
+
 class RoboConfig(BaseModel):
     """Validated robo-advisor configuration (from ``config/robo.yaml``)."""
 
@@ -41,6 +105,9 @@ class RoboConfig(BaseModel):
     allowlist: list[str] = Field(default_factory=list)
 
     caps: RoboCaps = Field(default_factory=RoboCaps)
+
+    # Event-driven signal settings (Phase 2). Disabled by default.
+    signals: SignalConfig = Field(default_factory=SignalConfig)
 
     # Safety: simulate everything and place no real orders when True. Default True.
     dry_run: bool = True

@@ -26,6 +26,7 @@ from investment_monitor.robo.models import (
     ProposedOrder,
 )
 from investment_monitor.robo.prompts import PROPOSAL_PROMPT
+from investment_monitor.robo.signals import SignalSnapshot, tilt_targets
 
 if TYPE_CHECKING:
     from investment_monitor.analysis.local_llm import LocalLLM
@@ -162,19 +163,52 @@ def _positions_block(account_state: AccountState, config: RoboConfig) -> str:
     return "\n".join(lines)
 
 
+def _signals_block(signals: "SignalSnapshot | None") -> str:
+    """Render the event-signal context for the prompt ("" when there are none)."""
+    if signals is None or signals.is_empty:
+        return ""
+    return signals.prompt_block()
+
+
 class RoboProposer:
-    """Produces candidate orders, preferring the LLM but always able to fall back."""
+    """Produces candidate orders, preferring the LLM but always able to fall back.
+
+    Event signals (Phase 2) are advisory: they tilt the *deterministic* path's
+    effective target weights (bounded by ``signals.max_event_tilt``) and are shown
+    to the LLM as context. Either way every resulting order is re-checked by the
+    guardrail gate, which never sees the signals.
+    """
 
     def __init__(self, local_llm: "LocalLLM | None", config: RoboConfig) -> None:
         self._llm = local_llm
         self._config = config
 
-    def propose(self, account_state: AccountState) -> tuple[list[ProposedOrder], str]:
-        """Return (orders, source) where source is 'llm' or 'deterministic'."""
-        deterministic = generate_candidate_orders(account_state, self._config)
+    def propose(
+        self,
+        account_state: AccountState,
+        *,
+        signals: "SignalSnapshot | None" = None,
+    ) -> tuple[list[ProposedOrder], str]:
+        """Return (orders, source).
+
+        ``source`` is 'deterministic' / 'llm', with a '+sig' suffix when event
+        signals were active. Backward-compatible: ``signals=None`` reproduces the
+        signal-free behavior exactly (identical orders and prompt).
+        """
+        signals_active = signals is not None and not signals.is_empty
+
+        # The deterministic path (also the LLM fallback) tilts its targets on events.
+        det_config = self._config
+        if signals_active:
+            tilted = tilt_targets(
+                self._config.target_allocation, signals, self._config.signals.max_event_tilt
+            )
+            det_config = self._config.model_copy(update={"target_allocation": tilted})
+        deterministic = generate_candidate_orders(account_state, det_config)
+        det_source = "deterministic+sig" if signals_active else "deterministic"
 
         if not self._config.use_llm or self._llm is None or not self._llm.is_available():
-            return deterministic, "deterministic"
+            return deterministic, det_source
 
         try:
             prompt = PROPOSAL_PROMPT.format(
@@ -184,6 +218,7 @@ class RoboProposer:
                 max_order_pct=f"{self._config.caps.max_order_pct:.0%}",
                 rebalance_threshold=f"{self._config.rebalance_threshold:.0%}",
                 positions_block=_positions_block(account_state, self._config),
+                signals_block=_signals_block(signals),
             )
             response = self._llm.client.generate(
                 model=self._llm.model,
@@ -193,10 +228,10 @@ class RoboProposer:
             text = (response.get("response") or "").strip()
         except Exception as exc:  # noqa: BLE001 - any LLM failure -> deterministic fallback
             logger.warning("LLM proposal failed ({e}); using deterministic rebalance", e=exc)
-            return deterministic, "deterministic"
+            return deterministic, det_source
 
         orders = parse_orders(text)
         if not orders:
             logger.info("LLM returned no usable orders; using deterministic rebalance")
-            return deterministic, "deterministic"
-        return orders, "llm"
+            return deterministic, det_source
+        return orders, ("llm+sig" if signals_active else "llm")

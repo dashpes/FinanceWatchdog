@@ -31,6 +31,7 @@ from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
 from investment_monitor.robo.models import AccountState, GateDecision
+from investment_monitor.robo.signals import fetch_signals
 from investment_monitor.storage import (
     RoboOrder,
     RoboRun,
@@ -156,14 +157,27 @@ def rebalance_run(
     for p in account.positions:
         prices.setdefault(p.symbol, p.price)
 
-    # --- 4 & 5. Proposal ---------------------------------------------------------
+    # --- 4 & 5. Proposal (optionally informed by event signals) ------------------
     proposer = RoboProposer(_build_local_llm(config, settings), config)
-    orders, source = proposer.propose(account)
-    for order in orders:
-        audit.proposal(order)
 
     # Open one session for the whole run (SQLite, single-user).
     with get_session() as session:
+        # Event-driven signals are advisory only — never seen by the gate. A
+        # failure here degrades gracefully to the baseline drift rebalance.
+        snapshot = None
+        if config.signals.enabled:
+            try:
+                snapshot = fetch_signals(session, config, account)
+                if not snapshot.is_empty:
+                    audit.signals(snapshot)
+            except Exception as exc:  # noqa: BLE001 - signals must never break a run
+                logger.warning("Signal fetch failed ({e}); proceeding without signals", e=exc)
+                snapshot = None
+
+        orders, source = proposer.propose(account, signals=snapshot)
+        for order in orders:
+            audit.proposal(order)
+
         run_row = RoboRun(
             run_id=run_id, dry_run=dry_run, account_id=account.account_id, source=source,
             total_value=float(account.total_value), settled_cash=float(account.settled_cash),

@@ -17,7 +17,7 @@ Total portfolio value: ${total_value}
 Available settled cash: ${settled_cash}
 Holdings and targets (symbol: current_weight -> target_weight, current_value, last_price):
 {positions_block}
-
+{signals_block}
 GOAL
 Propose orders that move each holding toward its target weight. Only trade a holding whose \
 drift from target exceeds {rebalance_threshold}. If the portfolio is already close to target, \

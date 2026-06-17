@@ -30,6 +30,39 @@ caps:
   max_orders_per_day: 10    # max orders placed across all runs in a calendar day
   fee_buffer: 0.01          # reserve 1% of order cost for fees/slippage in affordability checks
 
+# Event-driven signals (Phase 2). When enabled, the advisor reacts to recent
+# events — insider Form 4 buys/sells, congressional cluster trades, volume spikes,
+# high-relevance news, and earnings proximity — by nudging effective target weights
+# (and giving the LLM the same context). Signals are ADVISORY ONLY: they are never
+# seen by the guardrail gate and can never relax a cap. A name's target weight moves
+# by at most `max_event_tilt`, well under the per-order cap above. With enabled:false
+# (the default) behavior is identical to the pure drift-to-target rebalancer.
+signals:
+  enabled: false            # master switch; keep false until you've watched signal-driven dry-runs
+  # Lookback windows per source.
+  news_hours: 24
+  insider_days: 30
+  earnings_days_ahead: 14
+  congress_days: 90
+  volume_lookback: 20
+  recency_half_life_days: 7.0   # an event's weight halves every N days
+  # Relative weight of each category in the net directional score.
+  weights:
+    insider: 1.0            # insider Form 4 buys/sells (most trusted, directional)
+    congress: 0.5           # congressional cluster trades (directional)
+    volume: 0.4            # volume spikes (attention only — non-directional)
+    news: 0.3              # high-relevance news (attention only; LLM reads for direction)
+    earnings: 0.6          # earnings proximity (caution; suppresses buying into the name)
+  # Detection thresholds (mirror the existing alert rules).
+  news_relevance_min: 5.0   # 1-10 scale; ignore news below this relevance
+  insider_buy_min_value: 100000
+  insider_sell_min_value: 100000
+  cluster_min_unique: 3     # >= N distinct insiders/members in the window = cluster
+  volume_spike_multiplier: 2.5  # latest volume >= N x lookback average = spike
+  earnings_caution_days: 3  # earnings within N days flags CAUTION (don't add into it)
+  # RISK BOUND: the most a single name's target weight may move on events.
+  max_event_tilt: 0.05      # +/- 5 percentage points
+
 # Simulate the full pipeline and place NO real orders when true. Keep true until
 # you have reviewed several dry runs. The ROBO_FORCE_DRY_RUN env kill-switch must
 # ALSO be false for any live order to be placed.

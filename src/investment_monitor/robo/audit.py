@@ -82,6 +82,33 @@ class AuditLogger:
     def safety_check(self, *, passed: bool, detail: str) -> None:
         self._write("safety_check", {"passed": passed, "detail": detail})
 
+    def signals(self, snapshot: Any) -> None:
+        """Record the event-signal snapshot that informed this run's proposal."""
+        symbols = {
+            sym: {
+                "score": s.score,
+                "has_caution": s.has_caution,
+                "summary": s.summary,
+                "events": [
+                    {
+                        "category": e.category,
+                        "direction": e.direction,
+                        "magnitude": e.magnitude,
+                        "age_days": e.age_days,
+                        "caution": e.caution,
+                        "detail": e.detail,
+                    }
+                    for e in s.events
+                ],
+            }
+            for sym, s in snapshot.symbols.items()
+        }
+        self._write("signals", {
+            "as_of": snapshot.as_of,
+            "lookback_days": snapshot.lookback_days,
+            "symbols": symbols,
+        })
+
     def proposal(self, order: ProposedOrder) -> None:
         self._write("proposal", {"order": _order_dict(order)})
 
