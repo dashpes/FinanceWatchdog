@@ -110,9 +110,16 @@ class ResearchScorer:
         try:
             import ollama
             client = ollama.Client(host=self.base_url)
-            # List models to check if server is running
-            models = client.list()
-            model_names = [m.get("name", "") for m in models.get("models", [])]
+            # List models to check if server is running. Handle both the new ollama
+            # client (ListResponse.models with a .model attr) and the old dict shape.
+            response = client.list()
+            model_names: list[str] = []
+            if hasattr(response, "models"):
+                for m in response.models:
+                    model_names.append(getattr(m, "model", "") or "")
+            else:
+                for m in response.get("models", []):
+                    model_names.append(m.get("model") or m.get("name") or "")
 
             # Check if our model is available (handle both full and short names)
             base_model = self.model.split(":")[0]
