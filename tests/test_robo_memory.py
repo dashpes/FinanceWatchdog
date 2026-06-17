@@ -35,6 +35,20 @@ def test_model_router_resolves_roles_and_falls_back():
     assert router.get_model("nonexistent") == "phi3:mini"
 
 
+def test_model_router_resolve_to_installed():
+    # synthesis configured as qwen2.5:7b but only qwen2.5:14b is installed.
+    settings = Settings(ollama_model="phi3:mini", model_roles={"synthesis": "qwen2.5:7b"})
+    r = ModelRouter(settings)
+    # exact missing, same family installed -> family match (the real-world bug fix).
+    assert r.resolve("synthesis", installed=["qwen2.5:14b", "phi3:mini"]) == "qwen2.5:14b"
+    # exact installed -> exact.
+    assert r.resolve("synthesis", installed=["qwen2.5:7b", "qwen2.5:14b"]) == "qwen2.5:7b"
+    # no family member installed -> configured name (caller's fallback handles it).
+    assert r.resolve("synthesis", installed=["phi3:mini"]) == "qwen2.5:7b"
+    # can't query Ollama (installed=None path is exercised via empty list) -> preferred.
+    assert r.resolve("synthesis", installed=[]) == "qwen2.5:7b"
+
+
 # --------------------------------------------------------------------------- #
 # Cosine
 # --------------------------------------------------------------------------- #

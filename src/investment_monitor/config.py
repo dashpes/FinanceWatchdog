@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     model_roles: dict[str, str] = Field(
         default_factory=lambda: {
             "triage": "phi3:mini",
-            "synthesis": "qwen2.5:7b",
+            "synthesis": "qwen2.5:14b",
             "scoring": "phi3:mini",
             "embedding": "nomic-embed-text",
         }

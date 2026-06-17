@@ -199,7 +199,7 @@ def thesis_run(
             from investment_monitor.analysis.local_llm import LocalLLM
 
             synth_llm = LocalLLM(
-                model=ModelRouter(settings).get_model("synthesis"),
+                model=ModelRouter(settings).resolve("synthesis", base_url=settings.ollama_host),
                 base_url=settings.ollama_host,
             )
         except ImportError:
@@ -220,7 +220,7 @@ def thesis_run(
                 session=session,
                 config=settings,
                 research_config=research_config,
-                ollama_model=ModelRouter(settings).get_model("scoring"),
+                ollama_model=ModelRouter(settings).resolve("scoring", base_url=settings.ollama_host),
             )
             result = asyncio.run(pipeline.run_discovery(dry_run=False))
         typer.echo(
