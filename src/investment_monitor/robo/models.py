@@ -37,18 +37,51 @@ class OrderType(str, Enum):
 
 
 class Position(BaseModel):
-    """A single long position in the account."""
+    """A single long position in the account.
+
+    The ``unit_cost`` / ``unrealized_*`` fields are the broker's own cost-basis math
+    (Public computes them and returns them on each position). They are all optional:
+    the broker may omit a basis, and dry-run/paper snapshots have none. Treat ``None``
+    as "unknown", never as zero.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     symbol: str
     quantity: Decimal = Field(..., ge=0)
     price: Decimal = Field(..., ge=0, description="Latest/last price per share")
+    unit_cost: Decimal | None = Field(
+        default=None, ge=0, description="Average cost per share (broker cost basis)"
+    )
+    unrealized_gain: Decimal | None = Field(
+        default=None, description="Unrealized P&L in dollars, broker-reported"
+    )
+    unrealized_gain_pct: Decimal | None = Field(
+        default=None, description="Unrealized P&L as a percentage, broker-reported"
+    )
 
     @property
     def market_value(self) -> Decimal:
         """Current market value of the position."""
         return self.quantity * self.price
+
+    @property
+    def cost_basis_value(self) -> Decimal | None:
+        """Total cost basis (unit_cost * quantity); None when no basis is known."""
+        if self.unit_cost is None:
+            return None
+        return self.unit_cost * self.quantity
+
+    @property
+    def unrealized_return(self) -> Decimal | None:
+        """Unrealized return as a fraction (price / unit_cost - 1).
+
+        Derived from the broker's unit cost and the last price so the scale is
+        unambiguous (unlike the broker's percentage field). None when no basis.
+        """
+        if self.unit_cost is None or self.unit_cost <= 0:
+            return None
+        return self.price / self.unit_cost - 1
 
 
 class AccountState(BaseModel):
@@ -81,6 +114,28 @@ class AccountState(BaseModel):
     def total_value(self) -> Decimal:
         """Total portfolio value = settled cash + positions market value."""
         return self.settled_cash + self.positions_value
+
+    @property
+    def total_cost_basis(self) -> Decimal | None:
+        """Sum of position cost bases; None if no position reports a basis."""
+        bases = [p.cost_basis_value for p in self.positions if p.cost_basis_value is not None]
+        return sum(bases, Decimal("0")) if bases else None
+
+    @property
+    def total_unrealized_gain(self) -> Decimal | None:
+        """Total unrealized P&L across positions that report a cost basis.
+
+        Prefers the broker's own ``unrealized_gain`` per position; falls back to
+        (market value - cost basis) for any position that has a basis but no
+        broker-reported gain. None when no position has a basis at all.
+        """
+        contributions: list[Decimal] = []
+        for p in self.positions:
+            if p.unrealized_gain is not None:
+                contributions.append(p.unrealized_gain)
+            elif p.cost_basis_value is not None:
+                contributions.append(p.market_value - p.cost_basis_value)
+        return sum(contributions, Decimal("0")) if contributions else None
 
     def get_position(self, symbol: str) -> Position | None:
         """Return the position for ``symbol`` if held, else None."""

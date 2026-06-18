@@ -199,7 +199,27 @@ def account_state_from_raw(
                 price = current_value / quantity
             else:
                 price = Decimal("0")
-        positions.append(Position(symbol=symbol, quantity=quantity, price=price))
+        # Cost basis: Public computes this per position (CostBasis: unitCost, totalCost,
+        # gainValue, gainPercentage). Pull it through so P&L is read from the broker
+        # rather than re-derived. All fields are optional — absent in paper snapshots.
+        cb = _as_dict(_first(pd, "cost_basis", "costBasis", default={}))
+        unit_cost = _to_decimal(_first(cb, "unit_cost", "unitCost"))
+        if unit_cost is None:
+            total_cost = _to_decimal(_first(cb, "total_cost", "totalCost"))
+            if total_cost is not None and quantity > 0:
+                unit_cost = total_cost / quantity
+        unrealized_gain = _to_decimal(_first(cb, "gain_value", "gainValue"))
+        unrealized_gain_pct = _to_decimal(_first(cb, "gain_percentage", "gainPercentage"))
+        positions.append(
+            Position(
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                unit_cost=unit_cost,
+                unrealized_gain=unrealized_gain,
+                unrealized_gain_pct=unrealized_gain_pct,
+            )
+        )
 
     # In-flight orders: symbols with a still-working order at the broker. Used by the
     # gate to avoid stacking a new order on top of a queued one.

@@ -40,6 +40,7 @@ from investment_monitor.storage import (
     count_placed_orders_today,
     finalize_robo_run,
     get_active_symbols,
+    get_active_theses,
     get_recent_robo_runs,
     get_session,
     init_db,
@@ -97,6 +98,29 @@ def _build_local_llm(config: RoboConfig, settings: Settings):
         return None
     model = config.ollama_model or settings.ollama_model
     return LocalLLM(model=model, base_url=settings.ollama_host)
+
+
+def _reconcile_fill_costs(session, account: AccountState) -> None:
+    """Persist the broker's real cost basis onto each active thesis.
+
+    Writes ``entry_conditions['fill_cost']`` = the position's broker unit cost, so the
+    feedback loop scores realized return against the *actual fill price* rather than the
+    quote captured when the idea was written — and only for names we genuinely hold.
+    Fully fail-open: a reconcile error must never abort a rebalance run, and it is a
+    no-op in paper/dry-run (no broker cost basis), keeping that path byte-identical.
+    """
+    try:
+        for thesis in get_active_theses(session, account.account_id or None):
+            pos = account.get_position(thesis.symbol)
+            if pos is None or pos.unit_cost is None or pos.unit_cost <= 0:
+                continue
+            new_cost = float(pos.unit_cost)
+            entry = dict(thesis.entry_conditions or {})
+            if entry.get("fill_cost") != new_cost:
+                entry["fill_cost"] = new_cost
+                thesis.entry_conditions = entry  # reassign so the JSON column is dirtied
+    except Exception as exc:  # noqa: BLE001 - feedback bookkeeping must never break a run
+        logger.warning("fill-cost reconcile failed: {e}", e=exc)
 
 
 def rebalance_run(
@@ -181,6 +205,10 @@ def rebalance_run(
 
     # Open one session for the whole run (SQLite, single-user).
     with get_session() as session:
+        # Record the broker's real cost basis onto held theses so the feedback loop
+        # measures realized return from the actual fill, not the quote at idea time.
+        _reconcile_fill_costs(session, account)
+
         # Event-driven signals are advisory only — never seen by the gate. A
         # failure here degrades gracefully to the baseline drift rebalance.
         snapshot = None

@@ -98,6 +98,82 @@ def test_total_value_is_cash_plus_positions():
     assert state.total_value == Decimal("150")
 
 
+def _position_cb(symbol="VOO", quantity="2", last_price="500",
+                 unit_cost="450", gain_value="100.00", gain_percentage="11.11"):
+    """A position carrying Public's CostBasis sub-object."""
+    pos = {
+        "instrument": {"symbol": symbol, "name": symbol, "type": "EQUITY"},
+        "quantity": quantity,
+        "last_price": {"last_price": last_price},
+        "cost_basis": {
+            "unit_cost": unit_cost,
+            "total_cost": str(Decimal(unit_cost) * Decimal(quantity)),
+            "gain_value": gain_value,
+            "gain_percentage": gain_percentage,
+        },
+    }
+    return pos
+
+
+def test_cost_basis_parsed_into_position():
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[_position_cb(quantity="2", last_price="500",
+                                           unit_cost="450", gain_value="100.00")]),
+    )
+    pos = state.get_position("VOO")
+    assert pos.unit_cost == Decimal("450")
+    assert pos.unrealized_gain == Decimal("100.00")
+    assert pos.cost_basis_value == Decimal("900")
+    assert pos.unrealized_return == Decimal("500") / Decimal("450") - 1
+
+
+def test_unit_cost_derived_from_total_cost_when_unit_absent():
+    pos_raw = {
+        "instrument": {"symbol": "MSFT", "type": "EQUITY"},
+        "quantity": "4",
+        "last_price": {"last_price": "100"},
+        "cost_basis": {"total_cost": "320", "gain_value": "80"},  # no unitCost
+    }
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[pos_raw]),
+    )
+    assert state.get_position("MSFT").unit_cost == Decimal("80")  # 320 / 4
+
+
+def test_position_without_cost_basis_is_none_not_zero():
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[_position(quantity="2", current_value="1000", last_price="500")]),
+    )
+    pos = state.get_position("VOO")
+    assert pos.unit_cost is None
+    assert pos.unrealized_gain is None
+    assert pos.unrealized_return is None
+    assert pos.cost_basis_value is None
+
+
+def test_total_unrealized_gain_aggregates_and_signs():
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[
+            _position_cb(symbol="VOO", gain_value="100.00"),
+            _position_cb(symbol="MSFT", gain_value="-30.00"),
+        ]),
+    )
+    assert state.total_unrealized_gain == Decimal("70.00")
+
+
+def test_total_unrealized_gain_none_when_no_basis_reported():
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[_position(quantity="2", current_value="1000", last_price="500")]),
+    )
+    assert state.total_unrealized_gain is None
+    assert state.total_cost_basis is None
+
+
 def _order(symbol="VOO", status="NEW"):
     return {"order_id": "o1", "instrument": {"symbol": symbol, "type": "EQUITY"}, "status": status}
 

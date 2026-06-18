@@ -107,7 +107,15 @@ def check_safety(
     if account.positions:
         typer.echo("Positions:")
         for p in account.positions:
-            typer.echo(f"  {p.symbol:<6} {p.quantity} @ ${p.price} = ${p.market_value}")
+            line = f"  {p.symbol:<6} {p.quantity} @ ${p.price} = ${p.market_value}"
+            if p.unit_cost is not None:
+                gain = p.unrealized_gain
+                gain_str = f"${gain:+.2f}" if gain is not None else "n/a"
+                line += f"  (cost ${p.unit_cost}/sh, unrealized {gain_str})"
+            typer.echo(line)
+    total_unrl = account.total_unrealized_gain
+    if total_unrl is not None:
+        typer.echo(f"Unrealized P&L: ${total_unrl:+.2f}")
     if raw:
         typer.echo("\nRaw payloads (verify field mapping):")
         typer.echo(str(account.raw))
@@ -308,6 +316,55 @@ def status(
             started = r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else "?"
             counts = f"{r.num_proposed}/{r.num_accepted}/{r.num_rejected}/{r.num_placed}"
             typer.echo(f"{started:<20} {mode:<8} {r.status:<10} {counts:<20} {r.run_id}")
+
+
+@app.command("pnl")
+def pnl(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+) -> None:
+    """Show live positions with unrealized P&L (read straight from the broker)."""
+    settings = get_settings()
+    cfg = _load_config(config)
+    broker = PublicBroker(
+        api_token=settings.public_api_token,
+        account_id=cfg.account_id,
+        base_url=settings.public_api_base_url,
+        dry_run=True,
+    )
+    try:
+        account = broker.get_account_state()
+    except BrokerError as exc:
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Account: {account.account_id}    Total value: ${account.total_value}")
+    if not account.positions:
+        typer.echo("No open positions.")
+        return
+
+    header = f"{'symbol':<6} {'qty':>10} {'cost/sh':>10} {'price':>10} {'mkt val':>12} {'unreal $':>12} {'unreal %':>9}"
+    typer.echo(header)
+    for p in sorted(account.positions, key=lambda x: x.symbol):
+        cost = f"${p.unit_cost}" if p.unit_cost is not None else "n/a"
+        gain = f"{p.unrealized_gain:+.2f}" if p.unrealized_gain is not None else "n/a"
+        ret = p.unrealized_return
+        ret_str = f"{ret * 100:+.1f}%" if ret is not None else "n/a"
+        typer.echo(
+            f"{p.symbol:<6} {str(p.quantity):>10} {cost:>10} {f'${p.price}':>10} "
+            f"{f'${p.market_value:.2f}':>12} {gain:>12} {ret_str:>9}"
+        )
+
+    total_unrl = account.total_unrealized_gain
+    basis = account.total_cost_basis
+    typer.echo(f"\nSettled cash:   ${account.settled_cash}")
+    typer.echo(f"Positions value:${account.positions_value:.2f}")
+    if basis is not None:
+        typer.echo(f"Cost basis:     ${basis:.2f}")
+    if total_unrl is not None:
+        pct = f" ({total_unrl / basis * 100:+.1f}%)" if basis and basis > 0 else ""
+        typer.echo(f"Unrealized P&L: ${total_unrl:+.2f}{pct}")
+    else:
+        typer.echo("Unrealized P&L: n/a (broker reported no cost basis)")
 
 
 @app.command("learning")

@@ -232,7 +232,12 @@ def _outcome_block(session: "Session", thesis: Thesis, latest_price: float | Non
     """
     try:
         entry = thesis.entry_conditions or {}
-        ret = _realized_return(entry.get("entry_price"), latest_price)
+        # Prefer the real fill cost over the idea-time quote (see evaluate()), so the
+        # line shown to the LLM matches the outcome the feedback loop records.
+        entry_basis = entry.get("fill_cost")
+        if entry_basis is None:
+            entry_basis = entry.get("entry_price")
+        ret = _realized_return(entry_basis, latest_price)
         if ret is None:
             return ""
         days = _days_held(thesis)
@@ -241,7 +246,7 @@ def _outcome_block(session: "Session", thesis: Thesis, latest_price: float | Non
             return ""
         cap = float(lcfg.max_abs_return_pct) / 100.0
         ret_disp = max(-cap, min(cap, ret))
-        entry_price = float(entry["entry_price"])
+        entry_price = float(entry_basis)
         line = (
             f"opened ${entry_price:.2f} ~{days}d ago; now ${float(latest_price):.2f} "
             f"({ret_disp * 100:+.1f}%)"
@@ -310,7 +315,14 @@ class ThesisEvaluator:
         # — a learning-ledger bug must never stall the 24/7 maintenance loop.
         if lcfg is not None and lcfg.enabled and lcfg.record_outcomes:
             try:
-                realized = _realized_return(entry.get("entry_price"), latest_price)
+                # Prefer the broker's real fill cost (written by the rebalance run once
+                # a live position exists) over the quote captured at idea time, so the
+                # learned outcome reflects the actual trade. Falls back to entry_price
+                # in paper / before any fill — keeping that path byte-identical.
+                entry_basis = entry.get("fill_cost")
+                if entry_basis is None:
+                    entry_basis = entry.get("entry_price")
+                realized = _realized_return(entry_basis, latest_price)
                 today = _utcnow_naive().date()
                 # Record one outcome per symbol per day, only once the thesis has aged
                 # past min_days_held and actually moved — so intraday re-evals don't
