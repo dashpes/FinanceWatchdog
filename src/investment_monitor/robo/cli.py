@@ -300,9 +300,10 @@ def status(
             for o in orders:
                 size = f"${o.notional}" if o.notional is not None else f"{o.quantity} sh"
                 state = o.status or ("accepted" if o.gate_accepted else "rejected")
+                fill = f" filled {o.fill_quantity}@${o.fill_price}" if o.fill_price is not None else ""
                 typer.echo(
                     f"  {o.side:<4} {o.symbol:<6} {size:<10} {state:<16} "
-                    f"{o.gate_code or ''} {o.gate_reason or ''}"
+                    f"{o.gate_code or ''} {o.gate_reason or ''}{fill}"
                 )
             return
 

@@ -67,6 +67,7 @@ from .robo_operations import (
     finalize_robo_run,
     get_recent_robo_runs,
     get_robo_orders_for_run,
+    get_unfilled_placed_orders,
     save_robo_order,
     save_robo_run,
 )
@@ -179,6 +180,7 @@ __all__ = [
     "save_robo_order",
     "get_recent_robo_runs",
     "get_robo_orders_for_run",
+    "get_unfilled_placed_orders",
     "count_placed_orders_today",
     # Thesis store (autonomous investor)
     "Thesis",

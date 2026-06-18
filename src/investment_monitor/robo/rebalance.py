@@ -27,7 +27,7 @@ from loguru import logger
 
 from investment_monitor.config import Settings
 from investment_monitor.robo.audit import AuditLogger
-from investment_monitor.robo.broker import BrokerError, PublicBroker
+from investment_monitor.robo.broker import BrokerError, PublicBroker, fill_from_order_raw
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
@@ -42,6 +42,7 @@ from investment_monitor.storage import (
     get_active_symbols,
     get_active_theses,
     get_recent_robo_runs,
+    get_unfilled_placed_orders,
     get_session,
     init_db,
     save_robo_order,
@@ -121,6 +122,44 @@ def _reconcile_fill_costs(session, account: AccountState) -> None:
                 thesis.entry_conditions = entry  # reassign so the JSON column is dirtied
     except Exception as exc:  # noqa: BLE001 - feedback bookkeeping must never break a run
         logger.warning("fill-cost reconcile failed: {e}", e=exc)
+
+
+def _apply_fill(order_row, info: dict) -> bool:
+    """Apply a parsed ``get_order`` fill onto a RoboOrder row. Returns True if the
+    order reached a terminal state (so it no longer needs polling)."""
+    if info.get("average_price") is not None:
+        order_row.fill_price = float(info["average_price"])
+        order_row.fill_quantity = float(info.get("filled_quantity") or 0)
+        order_row.fill_status = info.get("status") or "FILLED"
+        return True
+    if info.get("terminal"):  # rejected / cancelled / expired — done, no fill
+        order_row.fill_quantity = 0.0
+        order_row.fill_status = info.get("status") or "TERMINAL"
+        return True
+    return False  # still working — leave fill_status NULL, retry next run
+
+
+def _reconcile_order_fills(session, broker: PublicBroker) -> None:
+    """Poll the broker for fills of previously-placed orders not yet reconciled.
+
+    Read-only and fail-open: a poll error on one order must never abort the run. A
+    no-op in paper (no live placements exist to reconcile).
+    """
+    try:
+        pending = get_unfilled_placed_orders(session)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("could not load unfilled orders: {e}", e=exc)
+        return
+    for order_row in pending:
+        try:
+            info = fill_from_order_raw(broker.get_order(order_row.broker_order_id))
+            if _apply_fill(order_row, info):
+                logger.info(
+                    "order {oid} reconciled: {st} {q}@{p}", oid=order_row.broker_order_id,
+                    st=order_row.fill_status, q=order_row.fill_quantity, p=order_row.fill_price,
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad poll never breaks the run
+            logger.warning("fill poll failed for {oid}: {e}", oid=order_row.broker_order_id, e=exc)
 
 
 def rebalance_run(
@@ -205,8 +244,10 @@ def rebalance_run(
 
     # Open one session for the whole run (SQLite, single-user).
     with get_session() as session:
-        # Record the broker's real cost basis onto held theses so the feedback loop
+        # Reconcile fills of prior live placements (read-only; no-op in paper), then
+        # record the broker's real cost basis onto held theses so the feedback loop
         # measures realized return from the actual fill, not the quote at idea time.
+        _reconcile_order_fills(session, broker)
         _reconcile_fill_costs(session, account)
 
         # Event-driven signals are advisory only — never seen by the gate. A
@@ -331,6 +372,13 @@ def rebalance_run(
                         num_placed += 1
                         audit.order_result(order, simulated=False, placed=True,
                                            broker_order_id=placed.order_id, status=placed.status)
+                        # Best-effort immediate fill capture; if the order hasn't traded
+                        # yet, the next run's _reconcile_order_fills backfills it.
+                        try:
+                            _apply_fill(order_row, fill_from_order_raw(broker.get_order(placed.order_id)))
+                        except Exception as exc:  # noqa: BLE001 - never fail a placed order
+                            logger.warning("immediate fill capture failed for {s}: {e}",
+                                           s=order.symbol, e=exc)
                         save_robo_order(session, order_row)
                         session.commit()  # durable before the next order is attempted
         except Exception as exc:  # noqa: BLE001 - record + return, never crash the loop

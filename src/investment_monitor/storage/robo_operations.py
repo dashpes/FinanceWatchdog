@@ -49,6 +49,24 @@ def get_robo_orders_for_run(session: Session, run_id: str) -> list[RoboOrder]:
     return list(session.scalars(stmt))
 
 
+def get_unfilled_placed_orders(session: Session, limit: int = 100) -> list[RoboOrder]:
+    """Live orders placed at the broker but not yet reconciled to a terminal state.
+
+    These need a ``get_order`` poll to capture the fill (or a reject/cancel). The
+    ``fill_status IS NULL`` sentinel means "still polling"; once resolved it is set,
+    so an order is reconciled at most until it reaches a terminal state.
+    """
+    stmt = (
+        select(RoboOrder)
+        .where(RoboOrder.placed.is_(True))
+        .where(RoboOrder.broker_order_id.is_not(None))
+        .where(RoboOrder.fill_status.is_(None))
+        .order_by(RoboOrder.created_at.asc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt))
+
+
 def count_placed_orders_today(session: Session) -> int:
     """Count orders actually PLACED at the broker today (UTC) — the per-day cap.
 

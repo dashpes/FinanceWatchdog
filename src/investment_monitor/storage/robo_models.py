@@ -62,6 +62,12 @@ class RoboOrder(Base):
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=True)
 
+    # Execution truth, reconciled from the broker after placement (live only). Until
+    # reconciled to a terminal state, fill_status is NULL (the "still polling" marker).
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

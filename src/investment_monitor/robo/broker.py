@@ -286,6 +286,31 @@ def trades_from_raw(transactions: list[Any] | None) -> list[Trade]:
     return out
 
 
+# Order statuses that mean the order is done — stop polling it.
+_TERMINAL_ORDER_STATUSES = frozenset(
+    {"FILLED", "REJECTED", "CANCELLED", "CANCELED", "EXPIRED", "REPLACED"}
+)
+
+
+def fill_from_order_raw(raw: Any) -> dict[str, Any]:
+    """Extract fill info from a ``get_order`` payload (pure, unit-testable).
+
+    Returns ``{status, average_price, filled_quantity, terminal}``. ``average_price``
+    / ``filled_quantity`` are None until the order trades; ``terminal`` is True once
+    the order has reached a final state (filled or rejected/cancelled).
+    """
+    d = _as_dict(raw)
+    status = str(_first(d, "status", "orderStatus", "order_status", default="")).upper()
+    avg_price = _to_decimal(_first(d, "average_price", "averagePrice"))
+    filled_qty = _to_decimal(_first(d, "filled_quantity", "filledQuantity"))
+    return {
+        "status": status,
+        "average_price": avg_price,
+        "filled_quantity": filled_qty,
+        "terminal": status in _TERMINAL_ORDER_STATUSES or avg_price is not None,
+    }
+
+
 def _parse_timestamp(value: Any) -> Any:
     """Best-effort parse of a transaction timestamp (datetime passthrough or ISO str)."""
     from datetime import datetime as _dt
