@@ -20,7 +20,11 @@ from loguru import logger
 
 from investment_monitor.robo.config import RoboConfig, SizingConfig
 from investment_monitor.robo.models import CASH_SYMBOL
-from investment_monitor.storage import get_active_theses, get_simulation_results
+from investment_monitor.storage import (
+    accuracy_stats_for_symbol,
+    get_active_theses,
+    get_simulation_results,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -121,6 +125,47 @@ def size_position(conviction: float, risk: RiskMetrics | None, cfg: SizingConfig
     return _clamp(raw * tail_haircut, 0.0, cfg.max_position_weight)
 
 
+def accuracy_multiplier(
+    stats: dict,
+    *,
+    accuracy_weight: float,
+    floor: float,
+    ceiling: float,
+    min_samples: int,
+) -> float:
+    """Pure: a bounded sizing tilt from a symbol's realized-accuracy stats.
+
+    ``multiplier = 1 + accuracy_weight * (hit_rate - 0.5) * 2`` clamped to
+    ``[floor, ceiling]``. Neutral (1.0) until ``min_samples`` outcomes exist, so a
+    thin track record never moves sizing. With ``ceiling == 1.0`` the tilt is
+    shrink-only: it can dampen a poor-performing name but never inflate exposure.
+    """
+    n = int(stats.get("n", 0) or 0)
+    if accuracy_weight <= 0 or n < min_samples:
+        return 1.0
+    hit_rate = float(stats.get("ewma_hit_rate", stats.get("hit_rate", 0.5)))
+    return _clamp(1.0 + accuracy_weight * (hit_rate - 0.5) * 2.0, floor, ceiling)
+
+
+def _accuracy_mult(session: "Session", symbol: str, account_id: str | None, lcfg) -> float:
+    """Impure: read a symbol's accuracy stats and derive its multiplier (fail-open)."""
+    try:
+        stats = accuracy_stats_for_symbol(
+            session, symbol, account_id=account_id,
+            ewma_halflife=lcfg.ewma_halflife, recent_window=lcfg.recent_window,
+        )
+        return accuracy_multiplier(
+            stats,
+            accuracy_weight=lcfg.accuracy_weight,
+            floor=lcfg.modifier_floor,
+            ceiling=lcfg.modifier_ceiling,
+            min_samples=lcfg.min_samples,
+        )
+    except Exception as exc:  # noqa: BLE001 - a learning bug must never break sizing
+        logger.warning("accuracy multiplier failed for {s}: {e}", s=symbol, e=exc)
+        return 1.0
+
+
 def _latest_sim(session: "Session", symbol: str):
     try:
         sims = get_simulation_results(session, symbol, limit=1)
@@ -146,6 +191,8 @@ def compute_conviction_weights(
     """
     now = now or datetime.now(timezone.utc)
     cfg = config.sizing
+    lcfg = getattr(config, "learning", None)
+    use_accuracy = lcfg is not None and lcfg.enabled and lcfg.accuracy_sizing
 
     raw: dict[str, float] = {}
     for thesis in get_active_theses(session, account_id):
@@ -153,6 +200,10 @@ def compute_conviction_weights(
             thesis.conviction, _age_days(thesis.last_evaluated_at, now), cfg
         )
         weight = size_position(eff_conviction, risk_from_sim(_latest_sim(session, thesis.symbol)), cfg)
+        # Feedback loop: tilt size by the symbol's realized accuracy (no-op at 1.0
+        # until enough outcomes accrue; shrink-only unless modifier_ceiling > 1.0).
+        if weight > 0 and use_accuracy:
+            weight *= _accuracy_mult(session, thesis.symbol, account_id, lcfg)
         if weight > 0:
             # Clamp at the per-name cap even if multiple live theses exist for one
             # symbol, so accumulation can't exceed max_position_weight.
@@ -177,5 +228,6 @@ __all__ = [
     "risk_from_sim",
     "decay_conviction",
     "size_position",
+    "accuracy_multiplier",
     "compute_conviction_weights",
 ]

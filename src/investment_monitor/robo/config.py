@@ -150,6 +150,59 @@ class AutonomyConfig(BaseModel):
     require_buy_recommendation: bool = False
 
 
+class LearningConfig(BaseModel):
+    """Feedback-loop settings: the robo learns from its own realized outcomes (Phase 6).
+
+    The DB table ``learning_events`` is the system of record — full history lives
+    there at zero cost. Only COMPACT, EWMA-smoothed aggregates ever enter the LLM
+    prompt or the sizing math, so the feedback loop cannot rot the context window.
+
+    Enabled by default (paper trading), but learning is a *no-op until outcomes
+    accrue*: the accuracy multiplier is exactly 1.0 and the prompt is unchanged until
+    a symbol has ``min_samples`` recorded outcomes, so existing runs are unaffected
+    until the ledger has real data.
+    """
+
+    # Master switch for the whole feedback loop.
+    enabled: bool = True
+    # Record realized thesis outcomes into the ledger on every re-evaluation.
+    record_outcomes: bool = True
+    # Inject a compact realized-performance + track-record block into the re-eval prompt.
+    outcome_aware_reeval: bool = True
+    # Apply a bounded accuracy multiplier to conviction-driven sizing.
+    accuracy_sizing: bool = True
+
+    # Minimum recorded outcomes for a symbol before its aggregate stats influence
+    # sizing or the prompt's track-record line.
+    min_samples: int = Field(default=6, ge=1)
+    # Minimum whole days a thesis must be held before an outcome is recorded or the
+    # realized-performance line is shown — suppresses just-opened "~0d ago, +0.0%"
+    # noise and de-duplicates intraday re-evals to one outcome per symbol per day.
+    min_days_held: int = Field(default=2, ge=0)
+    # Strength of the tilt: multiplier = 1 + accuracy_weight*(hit_rate-0.5)*2, clamped.
+    accuracy_weight: float = Field(default=0.5, ge=0.0, le=1.0)
+    # Multiplier clamp band. Ceiling 1.0 = SHRINK-ONLY (dampen poor names, never
+    # amplify on a thin track record); raise above 1.0 to also reward reliable ones.
+    modifier_floor: float = Field(default=0.5, gt=0.0, le=1.0)
+    modifier_ceiling: float = Field(default=1.0, ge=1.0)
+    # Recency: hit-rate half-life in events, and how many recent events to aggregate.
+    ewma_halflife: float = Field(default=10.0, gt=0)
+    recent_window: int = Field(default=20, ge=1)
+
+    # Benchmark for the realized-excess-return line; display clamp for the prompt.
+    benchmark_symbol: str = "SPY"
+    max_abs_return_pct: float = Field(default=500.0, gt=0)
+
+    @model_validator(mode="after")
+    def _check_band(self) -> "LearningConfig":
+        if self.modifier_ceiling < self.modifier_floor:
+            raise ValueError(
+                f"modifier_ceiling ({self.modifier_ceiling}) must be >= "
+                f"modifier_floor ({self.modifier_floor})"
+            )
+        return self
+
+
 class RoboConfig(BaseModel):
     """Validated robo-advisor configuration (from ``config/robo.yaml``)."""
 
@@ -175,6 +228,10 @@ class RoboConfig(BaseModel):
 
     # Autonomous stock selection from the discovery funnel (Phase 4). Disabled by default.
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
+
+    # Feedback loop: learn from realized outcomes (Phase 6). On by default, but inert
+    # until the ledger accrues outcomes (min_samples gate keeps the multiplier at 1.0).
+    learning: LearningConfig = Field(default_factory=LearningConfig)
 
     # Safety: simulate everything and place no real orders when True. Default True.
     dry_run: bool = True

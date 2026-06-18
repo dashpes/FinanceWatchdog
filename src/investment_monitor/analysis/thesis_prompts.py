@@ -44,3 +44,30 @@ Recent event signals: {{signals_block}}
 {_THESIS_JSON_SPEC}
 
 JSON object:"""
+
+
+# Variant of THESIS_UPDATE_PROMPT used ONLY when the learning loop has a realized-
+# outcome block to inject (Phase 6). The base template above is left byte-for-byte
+# unchanged so a re-eval with no track record produces an identical prompt. The
+# block is factual and non-leading (numbers only — no buy/sell verdict); the model
+# still decides conviction.
+THESIS_UPDATE_PROMPT_WITH_OUTCOME = f"""You maintain an existing investment thesis for {{symbol}} and must update it \
+given fresh evidence. Revise the narrative and, crucially, your conviction (raise it only if evidence \
+confirms; cut it if the case is weakening). Weigh how the thesis has ACTUALLY performed against your \
+prior conviction — a confident thesis that keeps underperforming should lose conviction. You produce \
+only the thesis JSON; deterministic code handles sizing and the guardrail gate.
+
+CURRENT THESIS
+Narrative: {{narrative}}
+Current conviction: {{conviction}}
+
+FRESH EVIDENCE
+Factor scores now (0-100): {{score_block}}
+Recent headlines:
+{{news_block}}
+Recent event signals: {{signals_block}}
+Realized performance & track record: {{outcome_block}}
+
+{_THESIS_JSON_SPEC}
+
+JSON object:"""

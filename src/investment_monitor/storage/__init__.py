@@ -88,6 +88,21 @@ from .thesis_operations import (
     save_thesis,
     set_target_weight,
 )
+from .learning_models import (
+    LEARNING_KIND_ACCURACY_MODIFIER,
+    LEARNING_KIND_OUTCOME,
+    LEARNING_KIND_WEIGHT_ADAPTATION,
+    LearningEvent,
+)
+from .learning_operations import (
+    accuracy_stats_for_symbol,
+    get_outcome_symbols,
+    get_recent_outcomes,
+    outcome_exists_for_date,
+    outcome_metrics,
+    record_learning_event,
+    record_thesis_outcome,
+)
 
 __all__ = [
     # Database
@@ -177,6 +192,18 @@ __all__ = [
     "set_target_weight",
     "invalidate_thesis",
     "get_active_symbols",
+    # Learning / feedback ledger (Phase 6)
+    "LearningEvent",
+    "LEARNING_KIND_OUTCOME",
+    "LEARNING_KIND_ACCURACY_MODIFIER",
+    "LEARNING_KIND_WEIGHT_ADAPTATION",
+    "record_learning_event",
+    "record_thesis_outcome",
+    "get_recent_outcomes",
+    "get_outcome_symbols",
+    "outcome_exists_for_date",
+    "accuracy_stats_for_symbol",
+    "outcome_metrics",
     # Semantic memory (Phase 5)
     "MemoryEmbedding",
     "save_embedding",

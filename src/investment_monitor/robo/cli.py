@@ -22,6 +22,8 @@ from investment_monitor.robo.broker import BrokerError, PublicBroker
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
+    accuracy_stats_for_symbol,
+    get_outcome_symbols,
     get_recent_robo_runs,
     get_robo_orders_for_run,
     get_session,
@@ -306,6 +308,32 @@ def status(
             started = r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else "?"
             counts = f"{r.num_proposed}/{r.num_accepted}/{r.num_rejected}/{r.num_placed}"
             typer.echo(f"{started:<20} {mode:<8} {r.status:<10} {counts:<20} {r.run_id}")
+
+
+@app.command("learning")
+def learning(
+    limit: int = typer.Option(20, "--limit", help="Recent outcomes per symbol to aggregate"),
+) -> None:
+    """Show what the feedback loop has learned per symbol (from learning_events).
+
+    The ledger holds the full history; this prints only the compact aggregates that
+    actually feed sizing and the re-eval prompt — hit rate, recency-weighted hit
+    rate, and calibration (1 - Brier; higher is better-calibrated).
+    """
+    settings = get_settings()
+    init_db(settings.db_path)
+    with get_session() as session:
+        symbols = get_outcome_symbols(session)
+        if not symbols:
+            typer.echo("No learning outcomes recorded yet.")
+            return
+        typer.echo(f"{'symbol':<8} {'n':>4} {'hit%':>6} {'ewma%':>6} {'calib':>6}")
+        for sym in symbols:
+            st = accuracy_stats_for_symbol(session, sym, recent_window=limit)
+            typer.echo(
+                f"{sym:<8} {st['n']:>4} {st['hit_rate'] * 100:>5.0f}% "
+                f"{st['ewma_hit_rate'] * 100:>5.0f}% {1.0 - st['brier']:>6.2f}"
+            )
 
 
 def main() -> None:
