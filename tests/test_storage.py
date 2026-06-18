@@ -1,7 +1,7 @@
 """Tests for database storage."""
 
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -64,10 +64,12 @@ def test_price_exists(db_session):
 
 def test_get_prices_history(db_session):
     """Test getting price history."""
+    # Seed dates relative to today so they fall inside get_prices' lookback window
+    # (a fixed past date would silently age out of the window over time).
     for i in range(5):
         price = Price(
             ticker="AAPL",
-            date=date(2026, 1, 28 - i),
+            date=date.today() - timedelta(days=i),
             close=180.0 + i,
         )
         save_price(db_session, price)
