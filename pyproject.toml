@@ -34,6 +34,11 @@ ai = [
     "ollama>=0.1.0",
     "anthropic>=0.18.0",
 ]
+robo = [
+    # Public.com official Trading API SDK (import root: public_api_sdk).
+    # Pre-1.0 and prone to churn; pin if needed.
+    "publicdotcom-py>=0.1.15",
+]
 dashboard = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
@@ -48,6 +53,7 @@ dev = [
 [project.scripts]
 investment-monitor = "investment_monitor.cli:main"
 investment-research = "investment_monitor.research_cli:main"
+investment-robo = "investment_monitor.robo.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_monitor"]

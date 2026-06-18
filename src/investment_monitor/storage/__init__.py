@@ -61,6 +61,48 @@ from .research_operations import (
     save_score,
     save_simulation_result,
 )
+from .robo_models import RoboOrder, RoboRun
+from .robo_operations import (
+    count_placed_orders_today,
+    finalize_robo_run,
+    get_recent_robo_runs,
+    get_robo_orders_for_run,
+    save_robo_order,
+    save_robo_run,
+)
+from .memory_models import MemoryEmbedding
+from .memory_operations import (
+    cosine_similarity,
+    is_duplicate,
+    save_embedding,
+    search_similar,
+)
+from .thesis_models import LIVE_THESIS_STATUSES, Thesis, ThesisStatus
+from .thesis_operations import (
+    get_active_symbols,
+    get_active_theses,
+    get_all_theses,
+    get_thesis,
+    invalidate_thesis,
+    record_conviction_update,
+    save_thesis,
+    set_target_weight,
+)
+from .learning_models import (
+    LEARNING_KIND_ACCURACY_MODIFIER,
+    LEARNING_KIND_OUTCOME,
+    LEARNING_KIND_WEIGHT_ADAPTATION,
+    LearningEvent,
+)
+from .learning_operations import (
+    accuracy_stats_for_symbol,
+    get_outcome_symbols,
+    get_recent_outcomes,
+    outcome_exists_for_date,
+    outcome_metrics,
+    record_learning_event,
+    record_thesis_outcome,
+)
 
 __all__ = [
     # Database
@@ -128,4 +170,44 @@ __all__ = [
     "save_simulation_result",
     "get_simulation_results",
     "get_high_scoring_candidates",
+    # Robo advisor models
+    "RoboRun",
+    "RoboOrder",
+    # Robo advisor operations
+    "save_robo_run",
+    "finalize_robo_run",
+    "save_robo_order",
+    "get_recent_robo_runs",
+    "get_robo_orders_for_run",
+    "count_placed_orders_today",
+    # Thesis store (autonomous investor)
+    "Thesis",
+    "ThesisStatus",
+    "LIVE_THESIS_STATUSES",
+    "get_active_theses",
+    "get_all_theses",
+    "get_thesis",
+    "save_thesis",
+    "record_conviction_update",
+    "set_target_weight",
+    "invalidate_thesis",
+    "get_active_symbols",
+    # Learning / feedback ledger (Phase 6)
+    "LearningEvent",
+    "LEARNING_KIND_OUTCOME",
+    "LEARNING_KIND_ACCURACY_MODIFIER",
+    "LEARNING_KIND_WEIGHT_ADAPTATION",
+    "record_learning_event",
+    "record_thesis_outcome",
+    "get_recent_outcomes",
+    "get_outcome_symbols",
+    "outcome_exists_for_date",
+    "accuracy_stats_for_symbol",
+    "outcome_metrics",
+    # Semantic memory (Phase 5)
+    "MemoryEmbedding",
+    "save_embedding",
+    "search_similar",
+    "is_duplicate",
+    "cosine_similarity",
 ]

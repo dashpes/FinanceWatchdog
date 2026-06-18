@@ -12,6 +12,7 @@ A personal investment monitoring system that tracks your portfolio, collects mar
 - **ETF Holdings**: Track changes in ETF compositions
 - **AI Analysis**: Local LLM for news relevance scoring, Claude API for weekly synthesis
 - **Flexible Notifications**: Console logging (Slack/email ready to add)
+- **Robo Advisor**: Cash-only, long-only autonomous rebalancing of a Public.com account, with a deterministic guardrail gate the LLM cannot bypass (see [Robo Advisor](#robo-advisor))
 
 ## Quick Start
 
@@ -329,6 +330,71 @@ class SlackChannel(NotificationChannel):
         response = self.client.send(text=f"*{message.title}*\n{message.body}")
         return response.status_code == 200
 ```
+
+## Robo Advisor
+
+A locally-run, autonomous robo advisor that manages a small **cash-only** Public.com
+brokerage account. On a schedule it rebalances a **long-only** portfolio of stocks/ETFs
+toward a target allocation. A local LLM (Ollama) only *proposes* trades; a deterministic
+**guardrail gate** validates every order before it can reach the broker. The advisor can
+**never** trade on margin, short, write options, or move money — by construction.
+
+> Fund it with money you can afford to lose. The structural guarantees below prevent the
+> account from going below $0, but markets can still lose you the full deposit.
+
+### Safety guarantees (enforced in code, not by the model)
+
+1. **Cash account only** — startup refuses to run unless `brokerageAccountType == CASH`.
+2. **No money movement** — no deposit/withdraw/transfer is ever wrapped or called.
+3. **Long-only** — sells are capped at held quantity; no shorting.
+4. **No options / margin / leverage** — every order sends `useMargin=false`, and preflight
+   `marginRequirement` must be 0. Stop/option/crypto order shapes are rejected.
+5. **Spend ≤ settled cash** — buy cost (incl. a fee buffer) can't exceed settled cash;
+   sale proceeds are treated as unsettled and never reused within a run.
+6. **Order-type & symbol allowlists**, plus per-run / per-day / per-order size caps.
+7. **Dry-run by default** with an independent `ROBO_FORCE_DRY_RUN` env kill-switch.
+8. **Full append-only audit log** (`logs/robo_audit.jsonl`) of every proposal, gate
+   decision, preflight, and placed/simulated order.
+
+The LLM proposes; the gate disposes. See `src/investment_monitor/robo/gate.py` and its
+exhaustive tests in `tests/test_robo_gate.py`.
+
+### Setup (human steps)
+
+1. Open/confirm a **Public cash account** (margin OFF) and fund it.
+2. Generate a Public **API secret** (Settings → Security → API, 2FA required) and put it in
+   `.env` as `PUBLIC_API_TOKEN`.
+3. Install the broker SDK extra: `pip install -e '.[robo,ai]'`.
+4. `cp config/robo.yaml.example config/robo.yaml` and edit your target allocation + caps.
+5. (Optional) pull a JSON/tool-capable Ollama model (e.g. `qwen2.5`, `llama3.1`) and set
+   `ollama_model` in `config/robo.yaml`. Otherwise the rebalance is computed deterministically.
+
+### Usage
+
+```bash
+# Confirm the account is cash-only and print balances (exits non-zero on margin).
+investment-robo check-safety            # add --raw to dump payloads and verify field mapping
+
+# Run one rebalance in DRY-RUN (default): logs the orders it *would* place.
+investment-robo run --dry-run
+
+# Show recent runs (and orders for one run).
+investment-robo status
+investment-robo status --run-id <RUN_ID>
+
+# Go live (ALL must be true): config dry_run:false, ROBO_FORCE_DRY_RUN=false, and --live.
+investment-robo run --live --yes
+```
+
+There is **no Public.com paper-trading sandbox** — when live, orders are real money. Keep
+`dry_run: true` and watch a week of simulated runs before flipping anything.
+
+### Scheduling
+
+Copy `systemd/investment-robo.{service,timer}` to `/etc/systemd/system/`, set your user,
+then `systemctl enable --now investment-robo.timer`. Default cadence is weekly Monday
+~09:35 (server local time — set the host to America/New_York or adjust). The timer runs
+`investment-robo run`, which stays in dry-run until you explicitly enable live trading.
 
 ## License
 

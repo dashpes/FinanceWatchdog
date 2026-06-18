@@ -1,0 +1,123 @@
+# Robo advisor configuration (non-secret).
+# Copy to config/robo.yaml and edit. The Public.com API token is a SECRET and
+# goes in .env (PUBLIC_API_TOKEN), never here.
+#
+# SAFETY: this manages a real, cash-only Public.com account. Review every value
+# below before your first live run, and keep dry_run: true until you have watched
+# a full week of simulated runs. There is NO Public.com paper-trading sandbox —
+# when dry_run is false, orders are real money.
+
+# Target portfolio weights. Must sum to 1.0. "CASH" is a pseudo-symbol meaning
+# "leave this fraction uninvested".
+target_allocation:
+  VOO: 0.50    # Vanguard S&P 500 ETF
+  SCHD: 0.30   # Schwab US Dividend Equity ETF
+  CASH: 0.20   # leave 20% in cash
+
+# Only trade a holding when it drifts more than this fraction from its target.
+rebalance_threshold: 0.05
+
+# Symbols the guardrail gate will allow trading. If omitted, defaults to the
+# non-CASH symbols in target_allocation above.
+allowlist:
+  - VOO
+  - SCHD
+
+# Rate / size caps enforced deterministically by the guardrail gate.
+caps:
+  max_order_pct: 0.25       # max single-order notional as a fraction of portfolio value
+  max_orders_per_run: 5     # max orders placed in one rebalance run
+  max_orders_per_day: 10    # max orders placed across all runs in a calendar day
+  fee_buffer: 0.01          # reserve 1% of order cost for fees/slippage in affordability checks
+  # Autonomous-mode safety guards (Phase 4). Permissive defaults below = disabled,
+  # so rebalance mode is unchanged. Recommended values for autonomous mode in comments.
+  max_positions: 0          # 0 = unlimited; autonomous: e.g. 20 distinct holdings max
+  max_per_name_weight: 1.0  # 1.0 = no cap; autonomous: e.g. 0.15 (15% of portfolio per name)
+  max_turnover_pct: 0.0     # 0 = unlimited; autonomous: e.g. 0.5 (gross traded value per run)
+  max_drawdown_pct: 0.0     # 0 = breaker off; autonomous: e.g. 25 (halt buys when down 25% from peak)
+
+# Operating mode (Phase 3).
+#   "rebalance"  = drift toward the fixed target_allocation above (default; exactly
+#                  the original behavior).
+#   "autonomous" = ignore target_allocation and instead size positions from the
+#                  thesis store's conviction (see `sizing` below). The tradeable
+#                  universe becomes the set of names with a live thesis (plus any
+#                  current holdings, so positions can always be exited). The
+#                  guardrail gate and dry-run safety are unchanged in either mode.
+mode: rebalance
+
+# Event-driven signals (Phase 2). When enabled, the advisor reacts to recent
+# events — insider Form 4 buys/sells, congressional cluster trades, volume spikes,
+# high-relevance news, and earnings proximity — by nudging effective target weights
+# (and giving the LLM the same context). Signals are ADVISORY ONLY: they are never
+# seen by the guardrail gate and can never relax a cap. A name's target weight moves
+# by at most `max_event_tilt`, well under the per-order cap above. With enabled:false
+# (the default) behavior is identical to the pure drift-to-target rebalancer.
+signals:
+  enabled: false            # master switch; keep false until you've watched signal-driven dry-runs
+  # Lookback windows per source.
+  news_hours: 24
+  insider_days: 30
+  earnings_days_ahead: 14
+  congress_days: 90
+  volume_lookback: 20
+  recency_half_life_days: 7.0   # an event's weight halves every N days
+  # Relative weight of each category in the net directional score.
+  weights:
+    insider: 1.0            # insider Form 4 buys/sells (most trusted, directional)
+    congress: 0.5           # congressional cluster trades (directional)
+    volume: 0.4            # volume spikes (attention only — non-directional)
+    news: 0.3              # high-relevance news (attention only; LLM reads for direction)
+    earnings: 0.6          # earnings proximity (caution; suppresses buying into the name)
+  # Detection thresholds (mirror the existing alert rules).
+  news_relevance_min: 5.0   # 1-10 scale; ignore news below this relevance
+  insider_buy_min_value: 100000
+  insider_sell_min_value: 100000
+  cluster_min_unique: 3     # >= N distinct insiders/members in the window = cluster
+  volume_spike_multiplier: 2.5  # latest volume >= N x lookback average = spike
+  earnings_caution_days: 3  # earnings within N days flags CAUTION (don't add into it)
+  # RISK BOUND: the most a single name's target weight may move on events.
+  max_event_tilt: 0.05      # +/- 5 percentage points
+
+# Risk-adjusted conviction sizing (Phase 3, used only when mode: autonomous).
+# Deterministic math (never an LLM): conviction + Monte-Carlo risk -> a bounded
+# target weight. The LLM only sets conviction; the gate still re-checks every order.
+sizing:
+  max_position_weight: 0.15       # hard ceiling on any single name's weight
+  kelly_fraction: 0.25            # fractional-Kelly multiplier on the Sharpe signal
+  cvar_aversion: 2.0              # how hard to shrink size as 90d tail loss (CVaR) grows
+  risk_free: 0.04                 # annualized risk-free rate in the Sharpe numerator
+  min_vol: 0.05                   # volatility floor (stops near-zero-vol blowups)
+  no_sim_weight_per_conviction: 0.05   # weight = conviction * this when no simulation exists
+  conviction_half_life_days: 30.0 # conviction decays toward the floor with this half-life
+  conviction_floor: 0.5           # decay target (neutral) absent fresh confirming evidence
+  min_cash_weight: 0.05           # always keep at least this fraction in cash
+
+# Autonomous stock selection (Phase 4, used only when mode: autonomous). When
+# enabled, names from the research discovery funnel whose composite score clears
+# score_floor are promoted to active theses automatically (no human approval), and
+# then sized/traded through the gate like any other thesis. Disabled by default.
+autonomy:
+  enabled: false                  # master switch for self-selection
+  score_floor: 75.0               # composite score (0-100) required to promote a name
+  max_promotions_per_run: 3       # cap new names added per run (bias toward maintaining)
+  require_buy_recommendation: false  # also require a buy/strong_buy research report
+
+# Simulate the full pipeline and place NO real orders when true. Keep true until
+# you have reviewed several dry runs. The ROBO_FORCE_DRY_RUN env kill-switch must
+# ALSO be false for any live order to be placed.
+dry_run: true
+
+# Consult the local Ollama LLM for trade proposals. Its numeric output is always
+# re-checked by the deterministic gate, so this never affects safety — only the
+# proposal quality. If false, the rebalance is computed purely deterministically.
+use_llm: true
+
+# Optional: override the Ollama model just for the robo advisor. A tool-calling /
+# JSON-capable instruct model (e.g. qwen2.5, llama3.1, mistral) is recommended over
+# the default phi3:mini for cleaner JSON proposals. Blank = use OLLAMA model setting.
+ollama_model: ""
+
+# Optional: the specific Public account number to trade. Required only if your
+# token can see more than one account. Blank = use the single/default account.
+account_id: ""

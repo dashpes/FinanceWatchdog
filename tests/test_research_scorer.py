@@ -1,6 +1,6 @@
 """Tests for ResearchScorer with Ollama integration."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -767,20 +767,23 @@ class TestScoreStock:
         """Should score stock across all factors."""
         scorer = ResearchScorer()
 
-        # Mock all scoring to return controlled values
+        # Mock all scoring to return controlled values. Force the per-factor path
+        # (batched scoring returns None) so the five mocked responses map 1:1 to the
+        # five factor calls — the batched fast path would otherwise consume one.
         with patch.object(scorer, "is_available", return_value=True):
-            with patch.object(
-                scorer,
-                "_generate",
-                side_effect=[
-                    '{"score": 70, "reasoning": "Value"}',
-                    '{"score": 60, "reasoning": "Growth"}',
-                    '{"score": 75, "reasoning": "Quality"}',
-                    '{"score": 65, "reasoning": "Momentum"}',
-                    '{"score": 55, "reasoning": "Sentiment"}',
-                ],
-            ):
-                candidate = await scorer.score_stock(
+            with patch.object(scorer, "_score_batched", new_callable=AsyncMock, return_value=None):
+                with patch.object(
+                    scorer,
+                    "_generate",
+                    side_effect=[
+                        '{"score": 70, "reasoning": "Value"}',
+                        '{"score": 60, "reasoning": "Growth"}',
+                        '{"score": 75, "reasoning": "Quality"}',
+                        '{"score": 65, "reasoning": "Momentum"}',
+                        '{"score": 55, "reasoning": "Sentiment"}',
+                    ],
+                ):
+                    candidate = await scorer.score_stock(
                     fundamentals=sample_fundamentals,
                     weights=default_weights,
                     price_change_1m=5.0,

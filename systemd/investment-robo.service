@@ -1,0 +1,13 @@
+[Unit]
+Description=Investment Robo Advisor Rebalance
+After=network.target
+
+[Service]
+Type=oneshot
+User=your-user
+WorkingDirectory=/opt/investment-monitor
+# `run` respects config/robo.yaml `dry_run` and the ROBO_FORCE_DRY_RUN env
+# kill-switch. To go live you must set BOTH dry_run: false and
+# ROBO_FORCE_DRY_RUN=false (and pass --live --yes). Keep dry-run until ready.
+ExecStart=/opt/investment-monitor/.venv/bin/investment-robo run
+Environment=PYTHONUNBUFFERED=1

@@ -59,6 +59,36 @@ class ScoreResult:
 DEFAULT_SCORE = 50.0
 DEFAULT_REASONING = "LLM unavailable - using neutral default score"
 
+# The five factors, in order. Used by the single-call (batched) scoring path.
+_FACTORS = ("value", "growth", "quality", "momentum", "sentiment")
+
+# One prompt that scores all five factors in a single LLM call (5x fewer calls
+# than the per-factor path, much lighter on a RAM-constrained box). Falls back to
+# the per-factor methods if the batched response can't be parsed.
+BATCH_SCORE_PROMPT = """You are an equity analyst. Score {ticker} ({sector} / {industry}) on \
+FIVE factors, each 0-100 (50 = neutral). Be concise and consistent.
+
+VALUE        P/E {pe_ratio}, P/B {pb_ratio}, P/S {ps_ratio}, PEG {peg_ratio}, \
+div yield {dividend_yield}%, FCF {free_cash_flow}
+GROWTH       rev YoY {revenue_growth_yoy}%, rev 3y {revenue_growth_3y}%, \
+EPS YoY {eps_growth_yoy}%, EPS 3y {eps_growth_3y}%
+QUALITY      ROE {roe}%, profit margin {profit_margin}%, debt/equity {debt_to_equity}, \
+current ratio {current_ratio}
+MOMENTUM     1m {price_change_1m}%, 3m {price_change_3m}%, 6m {price_change_6m}%, \
+1y {price_change_1y}%, RSI {rsi}, vs52wHigh {vs_52w_high}, vs52wLow {vs_52w_low}
+SENTIMENT    news: {recent_news_summary}; insiders: {insider_activity}; \
+analysts: {analyst_rating}; short interest {short_interest}
+
+Respond with ONLY a JSON object (no prose, no markdown), each factor a 0-100 score \
+and a one-line reason:
+{{"value": {{"score": <0-100>, "reasoning": "<short>"}},
+  "growth": {{"score": <0-100>, "reasoning": "<short>"}},
+  "quality": {{"score": <0-100>, "reasoning": "<short>"}},
+  "momentum": {{"score": <0-100>, "reasoning": "<short>"}},
+  "sentiment": {{"score": <0-100>, "reasoning": "<short>"}}}}
+
+JSON object:"""
+
 
 class ResearchScorer:
     """AI-powered stock scorer using Ollama for multi-factor analysis.
@@ -110,9 +140,16 @@ class ResearchScorer:
         try:
             import ollama
             client = ollama.Client(host=self.base_url)
-            # List models to check if server is running
-            models = client.list()
-            model_names = [m.get("name", "") for m in models.get("models", [])]
+            # List models to check if server is running. Handle both the new ollama
+            # client (ListResponse.models with a .model attr) and the old dict shape.
+            response = client.list()
+            model_names: list[str] = []
+            if hasattr(response, "models"):
+                for m in response.models:
+                    model_names.append(getattr(m, "model", "") or "")
+            else:
+                for m in response.get("models", []):
+                    model_names.append(m.get("model") or m.get("name") or "")
 
             # Check if our model is available (handle both full and short names)
             base_model = self.model.split(":")[0]
@@ -135,11 +172,12 @@ class ResearchScorer:
             self._available = False
             return False
 
-    def _generate(self, prompt: str) -> str | None:
+    def _generate(self, prompt: str, num_predict: int = 200) -> str | None:
         """Generate a response from the LLM.
 
         Args:
             prompt: The prompt to send to the LLM.
+            num_predict: Token cap (raised for the batched 5-factor call).
 
         Returns:
             The LLM response text, or None if unavailable.
@@ -150,13 +188,57 @@ class ResearchScorer:
                 prompt=prompt,
                 options={
                     "temperature": 0.1,  # Low temperature for consistent scoring
-                    "num_predict": 200,  # Allow enough tokens for JSON + reasoning
+                    "num_predict": num_predict,
                 },
             )
             return response.get("response", "").strip()
         except Exception as e:
             logger.debug(f"LLM generation failed: {e}")
             return None
+
+    @staticmethod
+    def _extract_json_object(text: str | None) -> dict | None:
+        """Extract the first JSON object (dict) from a possibly-noisy response."""
+        if not text:
+            return None
+        cleaned = text.strip()
+        fence = re.search(r"```(?:json)?\s*(.*?)```", cleaned, re.DOTALL)
+        if fence:
+            cleaned = fence.group(1).strip()
+        for candidate in (cleaned, None):
+            if candidate is None:
+                m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                candidate = m.group(0) if m else None
+            if candidate:
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    continue
+        return None
+
+    def _parse_batch_response(self, response: str | None) -> tuple[ScoreResult, ...] | None:
+        """Parse a single-call response holding all 5 factor scores.
+
+        Returns 5 ScoreResults (value, growth, quality, momentum, sentiment) in
+        order, or None if the response is unparseable or missing a factor — in which
+        case the caller falls back to the per-factor scoring path.
+        """
+        data = self._extract_json_object(response)
+        if not data:
+            return None
+        results: list[ScoreResult] = []
+        for factor in _FACTORS:
+            node = data.get(factor)
+            if not isinstance(node, dict) or node.get("score") is None:
+                return None
+            try:
+                score = max(0.0, min(100.0, float(node["score"])))
+            except (TypeError, ValueError):
+                return None
+            results.append(ScoreResult(score=score, reasoning=str(node.get("reasoning", "") or "")))
+        return tuple(results)
 
     def _parse_json_response(self, response: str | None) -> ScoreResult:
         """Parse a JSON response from the LLM.
@@ -431,6 +513,55 @@ class ResearchScorer:
         response = self._generate(prompt)
         return self._parse_json_response(response)
 
+    async def _score_batched(
+        self,
+        fundamentals: FundamentalsData,
+        *,
+        price_change_1m: float | None = None,
+        price_change_3m: float | None = None,
+        price_change_6m: float | None = None,
+        price_change_1y: float | None = None,
+        rsi: float | None = None,
+        vs_52w_high: float | None = None,
+        vs_52w_low: float | None = None,
+        recent_news_summary: str = "No recent news available",
+        insider_activity: str = "No insider activity data",
+        analyst_rating: str = "No analyst data",
+        short_interest: float | None = None,
+    ) -> tuple[ScoreResult, ...] | None:
+        """Score all 5 factors in one LLM call; None -> caller falls back per-factor."""
+        prompt = BATCH_SCORE_PROMPT.format(
+            ticker=fundamentals.ticker,
+            sector=fundamentals.sector or "Unknown",
+            industry=fundamentals.industry or "Unknown",
+            pe_ratio=self._format_value(fundamentals.pe_ratio),
+            pb_ratio=self._format_value(fundamentals.pb_ratio),
+            ps_ratio=self._format_value(fundamentals.ps_ratio),
+            peg_ratio=self._format_value(fundamentals.peg_ratio),
+            dividend_yield=self._format_value(fundamentals.dividend_yield, as_percent=True),
+            free_cash_flow=self._format_value(fundamentals.free_cash_flow),
+            revenue_growth_yoy=self._format_value(fundamentals.revenue_growth_yoy, as_percent=True),
+            revenue_growth_3y=self._format_value(fundamentals.revenue_growth_3y, as_percent=True),
+            eps_growth_yoy=self._format_value(fundamentals.eps_growth_yoy, as_percent=True),
+            eps_growth_3y=self._format_value(fundamentals.eps_growth_3y, as_percent=True),
+            roe=self._format_value(fundamentals.roe, as_percent=True),
+            profit_margin=self._format_value(fundamentals.profit_margin, as_percent=True),
+            debt_to_equity=self._format_value(fundamentals.debt_to_equity),
+            current_ratio=self._format_value(fundamentals.current_ratio),
+            price_change_1m=self._format_value(price_change_1m, as_percent=True),
+            price_change_3m=self._format_value(price_change_3m, as_percent=True),
+            price_change_6m=self._format_value(price_change_6m, as_percent=True),
+            price_change_1y=self._format_value(price_change_1y, as_percent=True),
+            rsi=self._format_value(rsi),
+            vs_52w_high=self._format_value(vs_52w_high, as_percent=True),
+            vs_52w_low=self._format_value(vs_52w_low, as_percent=True),
+            recent_news_summary=recent_news_summary,
+            insider_activity=insider_activity,
+            analyst_rating=analyst_rating,
+            short_interest=self._format_value(short_interest),
+        )
+        return self._parse_batch_response(self._generate(prompt, num_predict=600))
+
     async def calculate_composite_score(
         self,
         value_result: ScoreResult,
@@ -521,7 +652,24 @@ class ResearchScorer:
         Returns:
             CandidateScore with all factor scores and composite
         """
-        # Score each factor
+        # Fast path: score all 5 factors in ONE LLM call (5x fewer calls). Falls
+        # back to per-factor scoring below if the batched response can't be parsed.
+        if self.is_available():
+            batched = await self._score_batched(
+                fundamentals,
+                price_change_1m=price_change_1m, price_change_3m=price_change_3m,
+                price_change_6m=price_change_6m, price_change_1y=price_change_1y,
+                rsi=rsi, vs_52w_high=vs_52w_high, vs_52w_low=vs_52w_low,
+                recent_news_summary=recent_news_summary, insider_activity=insider_activity,
+                analyst_rating=analyst_rating, short_interest=short_interest,
+            )
+            if batched is not None:
+                v, g, q, m, s = batched
+                return await self.calculate_composite_score(
+                    v, g, q, m, s, weights, fundamentals.ticker
+                )
+
+        # Per-factor fallback (also the path when the LLM is unavailable -> defaults).
         value_result = await self.score_value(fundamentals)
         growth_result = await self.score_growth(fundamentals)
         quality_result = await self.score_quality(fundamentals)
