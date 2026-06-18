@@ -18,6 +18,7 @@ them keeps the run in simulation.
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -26,7 +27,7 @@ from loguru import logger
 
 from investment_monitor.config import Settings
 from investment_monitor.robo.audit import AuditLogger
-from investment_monitor.robo.broker import BrokerError, PublicBroker, SafetyViolation
+from investment_monitor.robo.broker import BrokerError, PublicBroker
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
@@ -110,6 +111,21 @@ def rebalance_run(
     run_id = str(uuid.uuid4())
     dry_run = _resolve_dry_run(config, settings, dry_run_override)
     audit = AuditLogger(settings.log_dir, run_id)
+
+    # Make the kill-switch state explicit on every LIVE run. A real OS/launchd env
+    # var silently overrides the .env file, so surface where the value came from —
+    # an operator who believes .env keeps them in paper would otherwise have no signal.
+    if not dry_run:
+        env_src = (
+            "OS/launchd environment (OVERRIDES .env)"
+            if "ROBO_FORCE_DRY_RUN" in os.environ
+            else ".env/default"
+        )
+        logger.warning(
+            "LIVE MODE — real orders ENABLED. ROBO_FORCE_DRY_RUN={v} (from {src}); "
+            "config.dry_run={d}. Revert with ROBO_FORCE_DRY_RUN=true or dry_run: true.",
+            v=settings.robo_force_dry_run, src=env_src, d=config.dry_run,
+        )
 
     if broker is None:
         broker = PublicBroker(
@@ -220,78 +236,93 @@ def rebalance_run(
         )
 
         num_accepted = num_rejected = num_placed = 0
-        for decision in decisions:
-            audit.gate_decision(decision)
-            order = decision.order
-            order_row = RoboOrder(
-                run_id=run_id, symbol=order.symbol,
-                side=order.side.value, order_type=order.order_type.value,
-                quantity=float(order.quantity) if order.quantity is not None else None,
-                notional=float(order.notional) if order.notional is not None else None,
-                limit_price=float(order.limit_price) if order.limit_price is not None else None,
-                source=order.source, reason=order.reason,
-                gate_accepted=decision.accepted, gate_code=decision.code,
-                gate_reason=decision.reason,
-            )
-            if not decision.accepted:
-                num_rejected += 1
-                order_row.status = "rejected"
-                save_robo_order(session, order_row)
-                continue
-            num_accepted += 1
+        final_status = "completed"
+        try:
+            for decision in decisions:
+                audit.gate_decision(decision)
+                order = decision.order
+                order_row = RoboOrder(
+                    run_id=run_id, symbol=order.symbol,
+                    side=order.side.value, order_type=order.order_type.value,
+                    quantity=float(order.quantity) if order.quantity is not None else None,
+                    notional=float(order.notional) if order.notional is not None else None,
+                    limit_price=float(order.limit_price) if order.limit_price is not None else None,
+                    source=order.source, reason=order.reason,
+                    gate_accepted=decision.accepted, gate_code=decision.code,
+                    gate_reason=decision.reason,
+                )
+                if not decision.accepted:
+                    num_rejected += 1
+                    order_row.status = "rejected"
+                    save_robo_order(session, order_row)
+                    continue
+                num_accepted += 1
 
-            # --- 7. Preflight ----------------------------------------------------
-            preflight = broker.preflight(order)
-            audit.preflight(order, preflight)
-            order_row.preflight_ok = preflight.ok
-            order_row.preflight_reason = preflight.message
-            if not preflight.ok:
-                order_row.status = "preflight_failed"
-                audit.order_result(order, simulated=False, placed=False,
-                                   detail=f"preflight failed: {preflight.message}")
-                save_robo_order(session, order_row)
-                continue
+                # --- 7. Preflight ------------------------------------------------
+                preflight = broker.preflight(order)
+                audit.preflight(order, preflight)
+                order_row.preflight_ok = preflight.ok
+                order_row.preflight_reason = preflight.message
+                if not preflight.ok:
+                    order_row.status = "preflight_failed"
+                    audit.order_result(order, simulated=False, placed=False,
+                                       detail=f"preflight failed: {preflight.message}")
+                    save_robo_order(session, order_row)
+                    continue
 
-            # --- 8. Place or simulate -------------------------------------------
-            if dry_run:
-                order_row.simulated = True
-                order_row.status = "simulated"
-                num_placed += 1
-                audit.order_result(order, simulated=True, placed=False, status="simulated")
-            elif config.require_market_hours and not market_open:
-                # Live, but the market is closed: defer placement (don't queue).
-                order_row.status = "deferred_market_closed"
-                audit.order_result(order, simulated=False, placed=False,
-                                   detail="market closed; placement deferred")
-            else:
-                try:
-                    placed = broker.place_order(order)
-                    order_row.placed = True
-                    order_row.broker_order_id = placed.order_id
-                    order_row.status = placed.status or "placed"
+                # --- 8. Place or simulate ---------------------------------------
+                if dry_run:
+                    order_row.simulated = True
+                    order_row.status = "simulated"
                     num_placed += 1
-                    audit.order_result(order, simulated=False, placed=True,
-                                       broker_order_id=placed.order_id, status=placed.status)
-                except (BrokerError, SafetyViolation) as exc:
-                    order_row.status = "place_failed"
-                    logger.error("Order placement failed for {s}: {e}", s=order.symbol, e=exc)
-                    audit.order_result(order, simulated=False, placed=False, detail=str(exc))
-            save_robo_order(session, order_row)
-
-        # --- 9. Finalize ---------------------------------------------------------
-        finalize_robo_run(
-            session, run_id,
-            finished_at=_utcnow(), status="completed",
-            num_accepted=num_accepted, num_rejected=num_rejected, num_placed=num_placed,
-        )
+                    audit.order_result(order, simulated=True, placed=False, status="simulated")
+                    save_robo_order(session, order_row)
+                elif config.require_market_hours and not market_open:
+                    # Live, but the market is closed: defer placement (don't queue).
+                    order_row.status = "deferred_market_closed"
+                    audit.order_result(order, simulated=False, placed=False,
+                                       detail="market closed; placement deferred")
+                    save_robo_order(session, order_row)
+                else:
+                    # Real placement. Catch ANY broker/SDK/network error (the SDK's
+                    # own exceptions are NOT BrokerError subclasses) so one bad order
+                    # can never abort the run, and COMMIT each confirmed placement the
+                    # instant the broker returns — a later failure must never roll back
+                    # a live order (which would hide it and risk a double-buy next run).
+                    try:
+                        placed = broker.place_order(order)
+                    except Exception as exc:  # noqa: BLE001 - unmapped SDK/network errors
+                        order_row.status = "place_failed"
+                        logger.error("Order placement failed for {s}: {e}", s=order.symbol, e=exc)
+                        audit.order_result(order, simulated=False, placed=False, detail=str(exc))
+                        save_robo_order(session, order_row)
+                    else:
+                        order_row.placed = True
+                        order_row.broker_order_id = placed.order_id
+                        order_row.status = placed.status or "placed"
+                        num_placed += 1
+                        audit.order_result(order, simulated=False, placed=True,
+                                           broker_order_id=placed.order_id, status=placed.status)
+                        save_robo_order(session, order_row)
+                        session.commit()  # durable before the next order is attempted
+        except Exception as exc:  # noqa: BLE001 - record + return, never crash the loop
+            final_status = "errored"
+            logger.error("Placement loop aborted ({e}); finalizing run as errored", e=exc)
+        finally:
+            # --- 9. Finalize (always reflects what actually happened) ------------
+            finalize_robo_run(
+                session, run_id,
+                finished_at=_utcnow(), status=final_status,
+                num_accepted=num_accepted, num_rejected=num_rejected, num_placed=num_placed,
+            )
 
     audit.run_summary(
         num_proposed=len(orders), num_accepted=num_accepted, num_rejected=num_rejected,
-        num_placed=num_placed, dry_run=dry_run, status="completed",
+        num_placed=num_placed, dry_run=dry_run, status=final_status,
     )
 
     result = RebalanceResult(
-        run_id=run_id, dry_run=dry_run, source=source, status="completed",
+        run_id=run_id, dry_run=dry_run, source=source, status=final_status,
         account_id=account.account_id, total_value=account.total_value,
         settled_cash=account.settled_cash, num_proposed=len(orders),
         num_accepted=num_accepted, num_rejected=num_rejected, num_placed=num_placed,
@@ -314,7 +345,9 @@ def _drawdown_halt(
     if config.caps.max_drawdown_pct <= 0 or current_total <= 0:
         return False
     try:
-        runs = get_recent_robo_runs(session, limit=200)
+        # Wide lookback so the true peak isn't silently truncated (the breaker would
+        # otherwise under-state drawdown and let buys through during a real decline).
+        runs = get_recent_robo_runs(session, limit=5000)
     except Exception as exc:  # noqa: BLE001 - history read must never break a run
         logger.warning("Drawdown history read failed ({e}); breaker not evaluated", e=exc)
         return False

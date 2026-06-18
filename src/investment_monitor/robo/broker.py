@@ -161,14 +161,18 @@ def account_state_from_raw(
         is_cash = False
 
     # Cash spendable in a cash account lives under buying_power.cash_only_buying_power.
+    # Use explicit None checks (NOT `or`) so a real $0 cash balance is respected and
+    # never falls through to the MARGINABLE buying_power field — on a cash-only
+    # advisor we must never read margin buying power as spendable cash.
     buying_power = _as_dict(_first(portfolio, "buying_power", "buyingPower", default={}))
-    settled_cash = (
-        _to_decimal(_first(buying_power, "cash_only_buying_power", "cashOnlyBuyingPower"))
-        or _to_decimal(_first(buying_power, "buying_power", "buyingPower"))
-        # Fall back to any flat cash field if the SDK shape changes.
-        or _to_decimal(_first(portfolio, "settled_cash", "settledCash", "cash"))
-        or Decimal("0")
-    )
+    cash_only = _to_decimal(_first(buying_power, "cash_only_buying_power", "cashOnlyBuyingPower"))
+    flat_cash = _to_decimal(_first(portfolio, "settled_cash", "settledCash", "cash"))
+    if cash_only is not None:
+        settled_cash = cash_only
+    elif flat_cash is not None:
+        settled_cash = flat_cash
+    else:
+        settled_cash = Decimal("0")
 
     positions: list[Position] = []
     raw_positions = _first(portfolio, "positions", "holdings", default=[]) or []
