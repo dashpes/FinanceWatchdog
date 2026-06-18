@@ -82,6 +82,27 @@ def test_market_early_close_half_day():
 # --------------------------------------------------------------------------- #
 # C. Placement durability
 # --------------------------------------------------------------------------- #
+def test_reconcile_schema_adds_missing_column(tmp_path):
+    # Simulate a learning_events table created before `as_of_date` existed (the exact
+    # live-DB drift the dry-run sanity check surfaced) and confirm reconcile adds it.
+    from sqlalchemy import create_engine, inspect, text
+
+    from investment_monitor.storage.database import _reconcile_schema
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as c:
+        c.execute(text(
+            "CREATE TABLE learning_events ("
+            "id INTEGER PRIMARY KEY, kind VARCHAR, symbol VARCHAR, created_at DATETIME)"
+        ))
+    _reconcile_schema(eng)
+    cols = {col["name"] for col in inspect(eng).get_columns("learning_events")}
+    assert "as_of_date" in cols        # the column that was silently missing
+    assert "realized_return" in cols   # other additive columns reconciled too
+    # Idempotent: a second pass is a no-op (doesn't raise / duplicate).
+    _reconcile_schema(eng)
+
+
 class _FlakyBroker:
     """Places the first order, then raises a non-BrokerError (SDK/network) error."""
 
