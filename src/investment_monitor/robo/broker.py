@@ -33,6 +33,7 @@ from investment_monitor.robo.models import (
     OrderType,
     Position,
     ProposedOrder,
+    Trade,
 )
 
 
@@ -251,6 +252,52 @@ def account_state_from_raw(
     )
 
 
+def trades_from_raw(transactions: list[Any] | None) -> list[Trade]:
+    """Normalize raw history transactions into executed :class:`Trade` records.
+
+    Pure function (no SDK/network) so the realized-P&L accounting is unit-testable.
+    Keeps only equity TRADE rows with a usable side/quantity/principal; everything
+    else (deposits, dividends, fees, money movement) is skipped.
+    """
+    out: list[Trade] = []
+    for raw in transactions or []:
+        td = _as_dict(raw)
+        if str(_first(td, "type", default="")).upper() != "TRADE":
+            continue
+        side_raw = str(_first(td, "side", default="")).upper()
+        if side_raw not in ("BUY", "SELL"):
+            continue
+        symbol = str(_first(td, "symbol", default="")).upper()
+        qty = _to_decimal(_first(td, "quantity"))
+        principal = _to_decimal(_first(td, "principal_amount", "principalAmount"))
+        if not symbol or qty is None or qty <= 0 or principal is None:
+            continue
+        fees = _to_decimal(_first(td, "fees")) or Decimal("0")
+        out.append(
+            Trade(
+                symbol=symbol,
+                side=OrderSide.BUY if side_raw == "BUY" else OrderSide.SELL,
+                quantity=abs(qty),
+                gross=abs(principal),
+                fees=abs(fees),
+                timestamp=_parse_timestamp(_first(td, "timestamp")),
+            )
+        )
+    return out
+
+
+def _parse_timestamp(value: Any) -> Any:
+    """Best-effort parse of a transaction timestamp (datetime passthrough or ISO str)."""
+    from datetime import datetime as _dt
+
+    if value is None or isinstance(value, _dt):
+        return value
+    try:
+        return _dt.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 class PublicBroker:
     """Wrapper over the Public.com SDK exposing only the calls the robo needs."""
 
@@ -362,6 +409,37 @@ class PublicBroker:
             except BrokerError as exc:
                 logger.warning("Could not backfill prices for {syms}: {e}", syms=missing, e=exc)
         return account_state_from_raw(account, portfolio, prices=prices)
+
+    def get_transactions(self, lookback_days: int = 365, max_pages: int = 25) -> list[Trade]:
+        """Fetch executed trades from account history (paginated), newest window first.
+
+        Best-effort and read-only: returns whatever pages succeed. Used for realized
+        P&L; never on the order-placement path.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from public_api_sdk import HistoryRequest  # type: ignore
+
+        account_id = self._account_id or None
+        start = datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+        trades: list[Trade] = []
+        next_token: str | None = None
+        for _ in range(max(1, max_pages)):
+            req = (
+                HistoryRequest(start=start, next_token=next_token)
+                if next_token
+                else HistoryRequest(start=start)
+            )
+            try:
+                raw = self.client.get_history(req, account_id) if account_id else self.client.get_history(req)
+            except TypeError:
+                raw = self.client.get_history(req)
+            page = _as_dict(raw)
+            trades.extend(trades_from_raw(_first(page, "transactions", default=[]) or []))
+            next_token = _first(page, "next_token", "nextToken")
+            if not next_token:
+                break
+        return trades
 
     def get_quotes(self, symbols: list[str]) -> dict[str, Decimal]:
         """Return last price per symbol. Takes/uses the SDK's instrument objects."""

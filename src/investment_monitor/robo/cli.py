@@ -366,6 +366,24 @@ def pnl(
     else:
         typer.echo("Unrealized P&L: n/a (broker reported no cost basis)")
 
+    # Realized P&L, reconstructed from the broker's executed-trade history.
+    realized_total = None
+    try:
+        from investment_monitor.robo.pnl import realized_pnl
+        rp = realized_pnl(broker.get_transactions())
+        realized_total = rp.total_realized
+        realized_syms = {s: sp for s, sp in rp.per_symbol.items() if sp.realized != 0}
+        if realized_syms:
+            typer.echo("\nRealized P&L (from trade history):")
+            for sym, sp in sorted(realized_syms.items()):
+                typer.echo(f"  {sym:<6} ${sp.realized:+.2f}")
+        typer.echo(f"Realized P&L:   ${realized_total:+.2f}  (fees ${rp.total_fees:.2f})")
+    except Exception as exc:  # noqa: BLE001 - reporting only; never fail the command
+        typer.secho(f"Realized P&L:   unavailable ({exc})", fg=typer.colors.YELLOW)
+
+    if realized_total is not None and total_unrl is not None:
+        typer.echo(f"Total P&L:      ${realized_total + total_unrl:+.2f}  (realized + unrealized)")
+
 
 @app.command("learning")
 def learning(

@@ -12,6 +12,7 @@ drift in affordability math.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -148,6 +149,28 @@ class AccountState(BaseModel):
         """Quantity currently held for ``symbol`` (0 if not held)."""
         pos = self.get_position(symbol)
         return pos.quantity if pos else Decimal("0")
+
+
+class Trade(BaseModel):
+    """A single executed trade from the broker's transaction history.
+
+    ``gross`` is the trade value before fees (price * qty); cost basis / proceeds
+    accounting layers fees on top in :mod:`investment_monitor.robo.pnl`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    side: OrderSide
+    quantity: Decimal = Field(..., gt=0)
+    gross: Decimal = Field(..., ge=0, description="Trade value (price * qty), fees excluded")
+    fees: Decimal = Field(default=Decimal("0"), ge=0)
+    timestamp: datetime | None = None
+
+    @property
+    def price(self) -> Decimal:
+        """Per-share execution price (gross / quantity)."""
+        return self.gross / self.quantity if self.quantity else Decimal("0")
 
 
 class ProposedOrder(BaseModel):
