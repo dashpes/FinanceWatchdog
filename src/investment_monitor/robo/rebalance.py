@@ -36,7 +36,7 @@ from investment_monitor.robo.signals import fetch_signals
 from investment_monitor.storage import (
     RoboOrder,
     RoboRun,
-    count_gate_accepted_orders_today,
+    count_placed_orders_today,
     finalize_robo_run,
     get_active_symbols,
     get_recent_robo_runs,
@@ -213,7 +213,7 @@ def rebalance_run(
         save_robo_run(session, run_row)
 
         # --- 6. Guardrail gate ---------------------------------------------------
-        orders_today = count_gate_accepted_orders_today(session)
+        orders_today = count_placed_orders_today(session)
         decisions = validate_orders(
             orders, account, gate_config, prices, orders_today=orders_today,
             active_symbols=active_symbols, halt_buys=halt_buys,

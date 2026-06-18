@@ -49,11 +49,12 @@ def get_robo_orders_for_run(session: Session, run_id: str) -> list[RoboOrder]:
     return list(session.scalars(stmt))
 
 
-def count_gate_accepted_orders_today(session: Session) -> int:
-    """Count gate-accepted orders created today (UTC) — used for the per-day cap.
+def count_placed_orders_today(session: Session) -> int:
+    """Count orders actually PLACED at the broker today (UTC) — the per-day cap.
 
-    Counts both simulated and live orders so a day of dry-runs is reflected in the
-    cap the same way a live day would be.
+    Only real placements count toward the cap. Simulated (dry-run), market-closed-
+    deferred, and failed orders do NOT, so a day of paper runs never exhausts the
+    live order budget. The cap is a real-money rate limit, so it tracks real trades.
     """
     start_of_day = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
@@ -61,7 +62,7 @@ def count_gate_accepted_orders_today(session: Session) -> int:
     stmt = (
         select(func.count())
         .select_from(RoboOrder)
-        .where(RoboOrder.gate_accepted.is_(True))
+        .where(RoboOrder.placed.is_(True))
         .where(RoboOrder.created_at >= start_of_day)
     )
     return int(session.scalar(stmt) or 0)

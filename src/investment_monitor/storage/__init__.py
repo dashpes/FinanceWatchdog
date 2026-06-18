@@ -63,7 +63,7 @@ from .research_operations import (
 )
 from .robo_models import RoboOrder, RoboRun
 from .robo_operations import (
-    count_gate_accepted_orders_today,
+    count_placed_orders_today,
     finalize_robo_run,
     get_recent_robo_runs,
     get_robo_orders_for_run,
@@ -164,7 +164,7 @@ __all__ = [
     "save_robo_order",
     "get_recent_robo_runs",
     "get_robo_orders_for_run",
-    "count_gate_accepted_orders_today",
+    "count_placed_orders_today",
     # Thesis store (autonomous investor)
     "Thesis",
     "ThesisStatus",

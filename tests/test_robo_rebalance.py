@@ -162,6 +162,24 @@ def test_live_run_places_when_market_open(tmp_path, monkeypatch):
     assert result.num_placed == 2 and broker.place_called == 2
 
 
+def test_per_day_cap_counts_only_real_placements(tmp_path):
+    # Simulated (dry-run) and deferred orders must NOT count toward the per-day cap,
+    # so a day of paper runs never exhausts the live order budget.
+    from investment_monitor.storage import RoboOrder, count_placed_orders_today, save_robo_order
+    init_db(tmp_path / "c.db")
+    with get_session() as s:
+        save_robo_order(s, RoboOrder(run_id="r1", symbol="VOO", side="buy",
+                                     order_type="market", gate_accepted=True, placed=True))
+        save_robo_order(s, RoboOrder(run_id="r1", symbol="MSFT", side="buy",
+                                     order_type="market", gate_accepted=True,
+                                     simulated=True, placed=False))
+        save_robo_order(s, RoboOrder(run_id="r1", symbol="AAPL", side="buy",
+                                     order_type="market", gate_accepted=True,
+                                     status="deferred_market_closed", placed=False))
+    with get_session() as s:
+        assert count_placed_orders_today(s) == 1  # only the real placement
+
+
 def test_overweight_account_generates_sell(tmp_path):
     # VOO heavily overweight -> a trim (sell) is proposed and simulated.
     acct = cash_account("10", positions=[
