@@ -25,6 +25,9 @@ class RoboRun(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=True)  # llm | deterministic
     total_value: Mapped[float] = mapped_column(Float, nullable=True)
     settled_cash: Mapped[float] = mapped_column(Float, nullable=True)
+    # Broker-reported unrealized P&L at run start — snapshotted so runs form an
+    # equity/P&L time series. Null when the broker reports no cost basis (paper).
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     num_proposed: Mapped[int] = mapped_column(Integer, default=0)
     num_accepted: Mapped[int] = mapped_column(Integer, default=0)
     num_rejected: Mapped[int] = mapped_column(Integer, default=0)

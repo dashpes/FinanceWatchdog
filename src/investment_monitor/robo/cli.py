@@ -311,12 +311,20 @@ def status(
         if not runs:
             typer.echo("No robo runs recorded yet.")
             return
-        typer.echo(f"{'started':<20} {'mode':<8} {'status':<10} prop/acc/rej/placed  run_id")
+        typer.echo(
+            f"{'started':<17} {'mode':<7} {'status':<10} {'value':>10} {'unreal':>9} "
+            f"{'p/a/r/x':<10} run_id"
+        )
         for r in runs:
             mode = "dry-run" if r.dry_run else "LIVE"
             started = r.started_at.strftime("%Y-%m-%d %H:%M") if r.started_at else "?"
             counts = f"{r.num_proposed}/{r.num_accepted}/{r.num_rejected}/{r.num_placed}"
-            typer.echo(f"{started:<20} {mode:<8} {r.status:<10} {counts:<20} {r.run_id}")
+            value = f"${r.total_value:,.0f}" if r.total_value is not None else "-"
+            unreal = f"${r.unrealized_pnl:+,.0f}" if r.unrealized_pnl is not None else "-"
+            typer.echo(
+                f"{started:<17} {mode:<7} {r.status:<10} {value:>10} {unreal:>9} "
+                f"{counts:<10} {r.run_id}"
+            )
 
 
 @app.command("pnl")

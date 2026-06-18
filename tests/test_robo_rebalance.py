@@ -190,3 +190,23 @@ def test_overweight_account_generates_sell(tmp_path):
     assert result.status == "completed"
     sides = {d.order.symbol: d.order.side.value for d in result.decisions}
     assert sides.get("VOO") == "sell"
+
+
+def test_run_snapshots_unrealized_pnl(tmp_path):
+    # The run records the broker's unrealized P&L so runs form a P&L time series.
+    acct = cash_account("100", positions=[
+        Position(symbol="VOO", quantity=Decimal("0.1"), price=Decimal("500"),
+                 unit_cost=Decimal("450"), unrealized_gain=Decimal("5")),
+    ])
+    rebalance_run(make_config(), make_settings(tmp_path), broker=FakeBroker(acct))
+    init_db(tmp_path / "test.db")
+    with get_session() as session:
+        assert get_recent_robo_runs(session, limit=1)[0].unrealized_pnl == 5.0
+
+
+def test_run_snapshot_unrealized_none_without_cost_basis(tmp_path):
+    # No broker cost basis (paper) -> snapshot stays None, never a misleading 0.
+    rebalance_run(make_config(), make_settings(tmp_path), broker=FakeBroker(cash_account("100")))
+    init_db(tmp_path / "test.db")
+    with get_session() as session:
+        assert get_recent_robo_runs(session, limit=1)[0].unrealized_pnl is None

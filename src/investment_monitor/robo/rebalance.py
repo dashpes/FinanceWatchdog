@@ -290,9 +290,11 @@ def rebalance_run(
         if not dry_run and config.require_market_hours and not market_open:
             logger.warning("Market closed: live order placement deferred this run")
 
+        unrealized = account.total_unrealized_gain
         run_row = RoboRun(
             run_id=run_id, dry_run=dry_run, account_id=account.account_id, source=source,
             total_value=float(account.total_value), settled_cash=float(account.settled_cash),
+            unrealized_pnl=float(unrealized) if unrealized is not None else None,
             num_proposed=len(orders), status="running",
         )
         save_robo_run(session, run_row)
