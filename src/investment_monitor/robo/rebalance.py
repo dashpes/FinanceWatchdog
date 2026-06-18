@@ -374,13 +374,14 @@ def rebalance_run(
                         num_placed += 1
                         audit.order_result(order, simulated=False, placed=True,
                                            broker_order_id=placed.order_id, status=placed.status)
-                        # Best-effort immediate fill capture; if the order hasn't traded
-                        # yet, the next run's _reconcile_order_fills backfills it.
-                        try:
-                            _apply_fill(order_row, fill_from_order_raw(broker.get_order(placed.order_id)))
-                        except Exception as exc:  # noqa: BLE001 - never fail a placed order
-                            logger.warning("immediate fill capture failed for {s}: {e}",
-                                           s=order.symbol, e=exc)
+                        # NB: we deliberately do NOT poll get_order here. Public placement
+                        # is asynchronous — right after placing, the order is either not yet
+                        # indexed (get_order 404s; eventual consistency, per the SDK) or not
+                        # yet filled (status NEW). Either way there is no fill to capture. The
+                        # fill price/qty is reconciled by _reconcile_order_fills at the start
+                        # of the next run (fill_status stays NULL until then), and unrealized
+                        # P&L / the learning fill_cost come from the position cost basis, not
+                        # from this order — so neither depends on an immediate poll.
                         save_robo_order(session, order_row)
                         session.commit()  # durable before the next order is attempted
         except Exception as exc:  # noqa: BLE001 - record + return, never crash the loop

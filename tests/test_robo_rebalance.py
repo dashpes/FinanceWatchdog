@@ -25,9 +25,16 @@ class FakeBroker:
         self.dry_run = dry_run
         self.place_called = 0
         self.preflight_called = 0
+        self.get_order_called = 0
 
     def get_account_state(self) -> AccountState:
         return self._account
+
+    def get_order(self, order_id):
+        # Tracked so tests can assert the placement path does NOT poll right after
+        # placing (Public placement is async / eventually consistent).
+        self.get_order_called += 1
+        return {"status": "NEW"}
 
     def get_quotes(self, symbols):
         return {"VOO": Decimal("500"), "SCHD": Decimal("80")}
@@ -125,6 +132,8 @@ def test_live_path_places_orders_when_fully_enabled(tmp_path):
     assert result.dry_run is False
     assert result.num_placed == 2
     assert broker.place_called == 2
+    # Placement must not eagerly poll get_order — fills are reconciled next run.
+    assert broker.get_order_called == 0
 
 
 def test_env_kill_switch_forces_dry_run_even_if_config_live(tmp_path):
