@@ -74,10 +74,12 @@ Cron examples:
     parser.add_argument(
         "--type",
         "-t",
-        choices=["regular", "digest", "weekly"],
+        choices=["regular", "digest", "weekly", "collect-broad"],
         default="regular",
         help="Type of run: regular (collect data, check alerts), "
-        "digest (daily summary), weekly (AI synthesis). Default: regular",
+        "digest (daily summary), weekly (AI synthesis), "
+        "collect-broad (market-wide event ingestion, universe-independent). "
+        "Default: regular",
     )
 
     parser.add_argument(
@@ -135,6 +137,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Config path: {args.config or 'default'}")
         print(f"  Log level: {log_level}")
         return 0
+
+    # Broad, universe-independent collection runs a different pipeline.
+    if args.type == "collect-broad":
+        from investment_monitor.broad_collect import run_broad_collection_sync
+
+        try:
+            results = run_broad_collection_sync()
+        except Exception as e:  # noqa: BLE001
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            for r in results:
+                print(str(r))
+        return 0 if all(r.success for r in results) else 1
 
     try:
         # Run the monitor

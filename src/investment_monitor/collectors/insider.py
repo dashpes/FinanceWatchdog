@@ -1,6 +1,7 @@
 """Insider Transaction Collector for SEC Form 4 filings."""
 
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 
 import httpx
 from bs4 import BeautifulSoup
@@ -26,8 +27,10 @@ class InsiderCollector(BaseCollector):
     SEC_CIK_LOOKUP_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
     SEC_BASE_URL = "https://www.sec.gov"
 
-    # User-Agent required by SEC - they block requests without a proper UA
-    USER_AGENT = "InvestmentMonitor/1.0 (Investment Tracking Application)"
+    # User-Agent required by SEC - they block requests without a proper UA.
+    # SEC asks for a real contact; broad ingestion makes many requests, so include one.
+    USER_AGENT = "FinanceWatchdog/1.0 (daniel.ashpes@gmail.com)"
+    EDGAR_ARCHIVES = "https://www.sec.gov/Archives"
 
     async def collect(self, tickers: list[str]) -> CollectorResult:
         """
@@ -115,6 +118,122 @@ class InsiderCollector(BaseCollector):
         # Commit after processing all filings for this ticker
         self.session.commit()
         return records_saved
+
+    # ----------------------------------------------------------------------- #
+    # Broad, universe-independent collection (SEC EDGAR daily index)
+    # ----------------------------------------------------------------------- #
+    async def collect_all(
+        self, *, days_back: int = 1, limit: int | None = None
+    ) -> CollectorResult:
+        """Retain ALL Form 4 insider transactions market-wide (broad collection).
+
+        Iterates the EDGAR *daily index* for the last ``days_back`` business days,
+        filters to Form 4, and parses each filing's ownership XML into
+        InsiderTransaction rows — across the WHOLE market, not a configured universe
+        (the issuer ticker is taken from the filing itself). Deduped by ``sec_url``.
+
+        Args:
+            days_back: how many recent business days of indexes to ingest.
+            limit: cap on filings to parse this run (safety/testing bound).
+        """
+        started_at = datetime.now()
+        records = 0
+        errors: list[str] = []
+        seen: set[str] = set()
+
+        async with httpx.AsyncClient(
+            headers={"User-Agent": self.USER_AGENT}, timeout=30.0
+        ) as client:
+            filing_urls: list[str] = []
+            for d in self._recent_business_dates(days_back):
+                try:
+                    idx = await self._get(client, self._daily_index_url(d))
+                    filing_urls.extend(self._parse_index_for_form4(idx))
+                except Exception as e:  # noqa: BLE001 - a missing/holiday index is fine
+                    logger.debug(f"{self.name}: daily index {d} unavailable: {e}")
+
+            if limit is not None:
+                filing_urls = filing_urls[:limit]
+            logger.info(f"{self.name}: {len(filing_urls)} Form 4 filings to parse (broad)")
+
+            for form_url in filing_urls:
+                try:
+                    txt = await self._get(client, form_url)
+                    xml = self._extract_ownership_xml(txt)
+                    if not xml:
+                        continue
+                    for txn in self._parse_form4(xml, None, form_url):
+                        if txn.sec_url in seen:
+                            continue
+                        seen.add(txn.sec_url)
+                        if not insider_transaction_exists(self.session, txn.sec_url):
+                            self.session.add(txn)  # commit once below, not per row
+                            records += 1
+                except Exception as e:  # noqa: BLE001 - one bad filing must not abort the run
+                    logger.debug(f"{self.name}: failed filing {form_url}: {e}")
+
+        try:
+            self.session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.session.rollback()
+            error_msg = f"Failed to commit broad insider transactions: {str(e)}"
+            errors.append(error_msg)
+            logger.error(f"{self.name}: {error_msg}")
+
+        return CollectorResult(
+            collector_name=self.name,
+            success=len(errors) == 0,
+            records_collected=records,
+            errors=errors,
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
+
+    async def _get(self, client: httpx.AsyncClient, url: str) -> str:
+        """Rate-limited GET (respects SEC's 10 req/s)."""
+        await self._rate_limit()
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
+
+    def _recent_business_dates(self, days_back: int) -> list[date]:
+        """The last ``days_back`` calendar days, weekdays only (newest first)."""
+        out: list[date] = []
+        today = date.today()
+        for i in range(max(1, days_back)):
+            day = today - timedelta(days=i)
+            if day.weekday() < 5:  # Mon-Fri (markets/EDGAR don't file weekends)
+                out.append(day)
+        return out
+
+    def _daily_index_url(self, d: date) -> str:
+        qtr = (d.month - 1) // 3 + 1
+        return f"{self.EDGAR_ARCHIVES}/edgar/daily-index/{d.year}/QTR{qtr}/form.{d:%Y%m%d}.idx"
+
+    def _parse_index_for_form4(self, idx_text: str) -> list[str]:
+        """Pull Form 4 submission URLs out of an EDGAR daily ``form.*.idx``.
+
+        Lines are: ``Form Type  Company Name  CIK  Date Filed  File Name``. The last
+        whitespace token is the submission path; the first is the form type.
+        """
+        urls: list[str] = []
+        for line in idx_text.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "4":  # exact Form 4 (not 4/A amendments)
+                continue
+            file_name = parts[-1]
+            if file_name.startswith("edgar/data/") and file_name.endswith(".txt"):
+                urls.append(f"{self.EDGAR_ARCHIVES}/{file_name}")
+        return urls
+
+    def _extract_ownership_xml(self, submission_text: str) -> str | None:
+        """Extract the ``<ownershipDocument>`` Form 4 XML from a full submission .txt."""
+        m = re.search(
+            r"<ownershipDocument>.*?</ownershipDocument>",
+            submission_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        return m.group(0) if m else None
 
     async def _get_cik_for_ticker(self, ticker: str) -> str | None:
         """
@@ -292,7 +411,7 @@ class InsiderCollector(BaseCollector):
         return None
 
     def _parse_form4(
-        self, xml_content: str, ticker: str, sec_url: str
+        self, xml_content: str, ticker: str | None, sec_url: str
     ) -> list[InsiderTransaction]:
         """
         Parse Form 4 XML into transaction records.
@@ -307,6 +426,13 @@ class InsiderCollector(BaseCollector):
         """
         transactions: list[InsiderTransaction] = []
         soup = BeautifulSoup(xml_content, "xml")
+
+        # Broad mode passes ticker=None; derive the issuer symbol from the filing itself.
+        if not ticker:
+            sym = soup.find("issuerTradingSymbol")
+            ticker = sym.text.strip().upper() if sym and sym.text else None
+            if not ticker:
+                return []  # can't attribute a transaction without an issuer ticker
 
         # Extract owner information
         owner_name = self._extract_owner_name(soup)
