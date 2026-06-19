@@ -11,11 +11,13 @@ from investment_monitor.analysis.confluence import (
     Evidence,
     detect_confluence,
     gather_insider_evidence,
+    gather_volume_evidence,
     score_confluence,
 )
 from investment_monitor.storage import (
     ConfluenceFinding,
     InsiderTransaction,
+    Price,
     get_session,
     init_db,
 )
@@ -170,3 +172,58 @@ def test_concentration_beats_routine_breadth(tmp_path):
         scores = {f.ticker: f.score for f in detect_confluence(s, ConfluenceConfig(), today=TODAY)}
     assert "CONV" in scores and "MEGA" in scores
     assert scores["CONV"] > scores["MEGA"]   # conviction ranks above raw headcount
+
+
+# --------------------------------------------------------------------------- #
+# v3: volume-spike second source + price context
+# --------------------------------------------------------------------------- #
+def _seed_prices(db, ticker, *, days=22, base_vol=100000, spike_vol=None,
+                 base_close=10.0, latest_close=None):
+    init_db(db)
+    with get_session() as s:
+        for i in range(days):
+            d = TODAY - timedelta(days=i)
+            vol = spike_vol if (i == 0 and spike_vol) else base_vol
+            close = latest_close if (i == 0 and latest_close) else base_close
+            s.add(Price(ticker=ticker, date=d, open=close, high=close, low=close,
+                        close=close, volume=vol))
+
+
+def test_volume_evidence_detects_spike(tmp_path):
+    db = tmp_path / "v.db"
+    _seed_prices(db, "SPK", spike_vol=300000)            # 3x the 100k baseline
+    with get_session() as s:
+        ev = gather_volume_evidence(s, {"SPK"}, TODAY)
+    assert len(ev) == 1 and ev[0].source == "volume" and ev[0].ticker == "SPK"
+
+
+def test_no_volume_evidence_without_spike(tmp_path):
+    db = tmp_path / "v.db"
+    _seed_prices(db, "FLAT")                              # flat volume, no spike
+    with get_session() as s:
+        assert gather_volume_evidence(s, {"FLAT"}, TODAY) == []
+
+
+def test_cross_source_insider_plus_volume(tmp_path):
+    # Only 2 insiders (below the 3-cluster floor) — but a corroborating volume spike
+    # makes it a cross-SOURCE finding.
+    db = tmp_path / "x.db"
+    _seed(db, [("XS", "Alice", "P", 2, 60000), ("XS", "Bob", "P", 3, 60000)])
+    _seed_prices(db, "XS", spike_vol=300000)
+    with get_session() as s:
+        findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
+        xs = [f for f in findings if f.ticker == "XS"]
+        assert xs, "expected a cross-source finding"
+        assert xs[0].n_sources == 2 and xs[0].kind == "multi_source"
+        assert "unusual volume" in xs[0].narrative
+
+
+def test_price_context_set_on_finding(tmp_path):
+    db = tmp_path / "p.db"
+    _seed(db, [("RISE", n, "P", 5, 60000) for n in ("A", "B", "C")])
+    _seed_prices(db, "RISE", base_close=10.0, latest_close=12.0)   # +20% since the buys
+    with get_session() as s:
+        findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
+        r = [f for f in findings if f.ticker == "RISE"][0]
+        assert r.price_change_pct is not None and r.price_change_pct > 15
+        assert "% since buys" in r.narrative

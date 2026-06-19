@@ -39,6 +39,10 @@ class ConfluenceFinding(Base):
     # How many distinct ACTORS across sources (e.g. distinct insiders + politicians).
     n_actors: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Price return since the buying began (latest close vs close at the median event
+    # date) — the payoff/risk anchor: "look here, and it's already up X%". Nullable
+    # (no price data for the ticker).
+    price_change_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Bounded list of the contributing evidence units (reassign-not-mutate to persist).
     evidence: Mapped[list] = mapped_column(JSON, default=list, nullable=False)

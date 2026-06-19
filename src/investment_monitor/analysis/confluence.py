@@ -21,7 +21,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, timedelta
-from statistics import median
+from statistics import mean, median
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -34,6 +34,7 @@ from investment_monitor.storage import (
     FINDING_MULTI_SOURCE,
     InsiderTransaction,
     finding_exists_for_date,
+    get_prices,
     get_session,
     init_db,
     save_finding,
@@ -91,6 +92,11 @@ class ConfluenceConfig(BaseModel):
     recency_halflife_days: float = Field(default=14.0, gt=0)
     recency_floor: float = Field(default=0.25, ge=0, le=1.0)
     exclude_entities: bool = True
+    # Volume-spike second source (only evaluated for insider-active tickers, so it
+    # CORROBORATES insider clusters rather than firing alone).
+    volume_spike_multiple: float = Field(default=2.0, gt=1.0)
+    volume_lookback: int = Field(default=20, ge=5)
+    volume_min_avg: float = Field(default=50_000.0, ge=0)
 
 
 def score_confluence(
@@ -189,28 +195,79 @@ def gather_insider_evidence(
     return out
 
 
+def gather_volume_evidence(
+    session, tickers: set[str], today: date, *,
+    spike_multiple: float = 2.0, lookback: int = 20, min_avg_volume: float = 50_000.0,
+) -> list[Evidence]:
+    """Volume-spike Evidence — a SECOND source — for the given (insider-active) tickers.
+
+    Evaluated only for tickers that already have insider evidence, so a volume spike
+    CORROBORATES a cluster (cross-source confluence) rather than firing on its own.
+    A spike = latest session volume >= ``spike_multiple`` x the trailing average.
+    """
+    out: list[Evidence] = []
+    for ticker in tickers:
+        try:
+            prices = get_prices(session, ticker, days=lookback + 8)  # newest-first
+            if len(prices) < max(5, lookback // 2):
+                continue
+            latest = prices[0]
+            prior = [p for p in prices[1:lookback + 1] if p.volume]
+            if not prior or latest.volume is None:
+                continue
+            avg_vol = mean(p.volume for p in prior)
+            if avg_vol < min_avg_volume:
+                continue
+            if latest.volume >= spike_multiple * avg_vol:
+                out.append(Evidence(
+                    ticker=ticker, source="volume", actor="volume_spike",
+                    date=latest.date, value=None,
+                    detail=f"volume {latest.volume / avg_vol:.1f}x {lookback}d avg",
+                ))
+        except Exception as exc:  # noqa: BLE001 - a missing/odd price series must not abort
+            logger.debug(f"volume evidence failed for {ticker}: {exc}")
+    return out
+
+
+def _price_change_since(session, ticker: str, since: date, today: date) -> float | None:
+    """Percent return from the close on/before ``since`` to the latest close (or None)."""
+    try:
+        prices = get_prices(session, ticker, days=(today - since).days + 8)
+        closes = [(p.date, p.close) for p in prices if p.close]
+        if len(closes) < 2:
+            return None
+        latest_close = closes[0][1]  # newest-first
+        at_since = next((c for d, c in closes if d <= since), closes[-1][1])
+        if not at_since or at_since <= 0:
+            return None
+        return (latest_close / at_since - 1.0) * 100.0
+    except Exception:  # noqa: BLE001 - price context is best-effort
+        return None
+
+
 def _finding_kind(stats: dict) -> str:
     return FINDING_MULTI_SOURCE if stats["n_sources"] > 1 else FINDING_INSIDER_CLUSTER
 
 
-def _build_narrative(ticker: str, evidence: list[Evidence], stats: dict, window_days: int) -> str:
-    """A factual, honest insight — the 'look here', with per-actor size + day spread."""
-    actors = sorted({e.actor for e in evidence})
-    names = ", ".join(actors[:4]) + (f" (+{len(actors) - 4} more)" if len(actors) > 4 else "")
-    dates = sorted(e.date for e in evidence)
-    span = f"{dates[0]:%b %d}" + (f"–{dates[-1]:%b %d}" if dates[-1] != dates[0] else "")
-    if stats["n_sources"] > 1:
-        srcs = ", ".join(sorted({e.source for e in evidence}))
-        return (
-            f"{ticker}: {stats['n_sources']} independent sources lined up ({srcs}) — "
-            f"{stats['n_actors']} distinct actors over {window_days}d ({span})."
-        )
+def _build_narrative(
+    ticker: str, evidence: list[Evidence], stats: dict, window_days: int,
+    price_change: float | None = None,
+) -> str:
+    """A factual, honest insight — the 'look here': per-actor size, day spread,
+    a volume-corroboration tag, and price context."""
+    ins = [e for e in evidence if e.source == "insider"]
+    insiders = sorted({e.actor for e in ins})
+    names = ", ".join(insiders[:4]) + (f" (+{len(insiders) - 4} more)" if len(insiders) > 4 else "")
+    idates = sorted(e.date for e in ins) or sorted(e.date for e in evidence)
+    span = f"{idates[0]:%b %d}" + (f"–{idates[-1]:%b %d}" if idates[-1] != idates[0] else "")
     total = stats["total_value"] or 0.0
     med = stats.get("median_per_actor") or 0.0
+    vol = " + unusual volume" if any(e.source == "volume" for e in evidence) else ""
+    pc = f" {price_change:+.0f}% since buys." if price_change is not None else ""
     return (
-        f"{ticker}: {len(actors)} insiders bought on the open market over {window_days}d "
-        f"({span}) — ${total:,.0f} total, ~${med:,.0f}/insider median, across "
-        f"{stats['distinct_days']} day(s). Buyers: {names}."
+        f"{ticker}: {len(insiders)} insiders bought on the open market{vol} over "
+        f"{window_days}d ({span}) — ${total:,.0f} total, ~${med:,.0f}/insider, "
+        f"{len(set(idates))} day(s).{pc} Buyers: {names}."
     )
 
 
@@ -231,10 +288,17 @@ def detect_confluence(
     config = config or ConfluenceConfig()
     today = today or date.today()
 
-    evidence = gather_insider_evidence(
+    insider_ev = gather_insider_evidence(
         session, config.window_days, today, exclude_entities=config.exclude_entities
     )
-    # Future broad sources append here — congress, volume spikes, news catalysts.
+    # Second source: volume spikes, evaluated ONLY for insider-active tickers so they
+    # corroborate clusters (true cross-source confluence). Congress/news append here next.
+    active_tickers = {e.ticker for e in insider_ev}
+    volume_ev = gather_volume_evidence(
+        session, active_tickers, today, spike_multiple=config.volume_spike_multiple,
+        lookback=config.volume_lookback, min_avg_volume=config.volume_min_avg,
+    )
+    evidence = insider_ev + volume_ev
 
     by_ticker: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence:
@@ -256,12 +320,17 @@ def detect_confluence(
         kind = _finding_kind(stats)
         if finding_exists_for_date(session, ticker, kind, today):
             continue
+        # Price context: return since the median insider-buy date (best-effort).
+        insider_dates = sorted(e.date for e in evs if e.source == "insider")
+        since = insider_dates[len(insider_dates) // 2] if insider_dates else stats["newest"]
+        price_change = _price_change_since(session, ticker, since, today)
         finding = ConfluenceFinding(
             ticker=ticker, kind=kind, score=round(stats["score"], 3),
             window_days=config.window_days, n_sources=stats["n_sources"],
             n_actors=stats["n_actors"], total_value=stats["total_value"],
+            price_change_pct=round(price_change, 2) if price_change is not None else None,
             evidence=_evidence_json(evs, config.max_evidence_stored),
-            narrative=_build_narrative(ticker, evs, stats, config.window_days),
+            narrative=_build_narrative(ticker, evs, stats, config.window_days, price_change),
             as_of_date=today,
         )
         save_finding(session, finding)
