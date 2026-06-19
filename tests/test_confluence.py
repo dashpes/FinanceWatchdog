@@ -248,3 +248,20 @@ def test_news_evidence_requires_min_items(tmp_path):
     assert "NWS" in tickers       # 3 headlines >= min_items
     assert "ONE" not in tickers   # 1 headline < min_items
     assert all(e.source == "news" for e in ev)
+
+
+def test_news_alone_cannot_qualify_a_finding(tmp_path):
+    # 2 insiders ($120k) + 3 headlines but NO volume — news must not make it a finding.
+    from datetime import datetime
+
+    from investment_monitor.storage import NewsItem
+
+    db = tmp_path / "nq.db"
+    _seed(db, [("NWQ", "Alice", "P", 2, 60000), ("NWQ", "Bob", "P", 3, 60000)])
+    with get_session() as s:
+        for i in range(3):
+            s.add(NewsItem(ticker="NWQ", headline=f"h{i}", source="x",
+                           url=f"http://nq/{i}", published_at=datetime(2026, 6, 17, 12, 0)))
+    with get_session() as s:
+        findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
+    assert [f for f in findings if f.ticker == "NWQ"] == []

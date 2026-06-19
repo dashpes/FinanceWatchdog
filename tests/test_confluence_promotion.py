@@ -16,20 +16,25 @@ from investment_monitor.storage import (
     init_db,
 )
 
-TODAY = date(2026, 6, 18)
+# Seed relative to the real today: the bridge applies recency (max_age_days) and
+# liquidity windows against date.today().
+TODAY = date.today()
 
 
-def _seed_finding(s, ticker, score, kind="insider_cluster"):
+def _seed_finding(s, ticker, score, kind="insider_cluster", price_change_pct=None, as_of=TODAY):
     s.add(ConfluenceFinding(
         ticker=ticker, kind=kind, score=score, window_days=30, n_sources=1,
-        n_actors=4, total_value=100000.0, evidence=[],
-        narrative=f"{ticker}: 4 insiders bought.", as_of_date=TODAY,
+        n_actors=4, total_value=100000.0, evidence=[], price_change_pct=price_change_pct,
+        narrative=f"{ticker}: 4 insiders bought.", as_of_date=as_of,
     ))
 
 
-def _seed_price(s, ticker, close=10.0):
-    s.add(Price(ticker=ticker, date=TODAY, open=close, high=close, low=close,
-                close=close, volume=100000))
+def _seed_price(s, ticker, close=10.0, volume=100000):
+    # 20 days of liquid history so the dollar-volume floor passes.
+    from datetime import timedelta
+    for i in range(20):
+        s.add(Price(ticker=ticker, date=TODAY - timedelta(days=i), open=close, high=close,
+                    low=close, close=close, volume=volume))
 
 
 def test_conviction_band():
@@ -73,3 +78,64 @@ def test_promote_caps_and_does_not_duplicate(tmp_path):
         second = promote_confluence_findings(s, min_score=4.0, max_promotions=3)
     # Already-promoted names are skipped; the next batch gets promoted instead.
     assert len(second) == 3 and set(second).isdisjoint(set(first))
+
+
+def test_illiquid_penny_stock_skipped(tmp_path):
+    init_path = tmp_path / "t.db"
+    init_db(init_path)
+    with get_session() as s:
+        _seed_finding(s, "PENNY", 8.0)
+        _seed_price(s, "PENNY", close=0.50)          # below the $3 floor
+        _seed_finding(s, "THIN", 8.0)
+        _seed_price(s, "THIN", close=10.0, volume=100)  # ~$1k/day dollar-volume, too thin
+        _seed_finding(s, "GOOD", 8.0)
+        _seed_price(s, "GOOD", close=10.0, volume=100000)
+    with get_session() as s:
+        promoted = promote_confluence_findings(s, min_score=4.0)
+    assert promoted == ["GOOD"]   # penny + thin are filtered out
+
+
+def test_already_run_up_skipped(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "RAN", 8.0, price_change_pct=135.0)   # already +135%
+        _seed_price(s, "RAN")
+        _seed_finding(s, "FRESH", 8.0, price_change_pct=5.0)
+        _seed_price(s, "FRESH")
+    with get_session() as s:
+        promoted = promote_confluence_findings(s, min_score=4.0, max_run_pct=40.0)
+    assert promoted == ["FRESH"]
+
+
+def test_stale_finding_not_promoted(tmp_path):
+    from datetime import timedelta
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "OLD", 8.0, as_of=TODAY - timedelta(days=10))  # outside 3-day window
+        _seed_price(s, "OLD")
+    with get_session() as s:
+        promoted = promote_confluence_findings(s, min_score=4.0, max_age_days=3)
+    assert promoted == []
+
+
+def test_falling_knife_not_repromoted_from_same_finding(tmp_path):
+    # A self-invalidated name must NOT be re-bought from the SAME stale finding.
+    from datetime import datetime
+
+    from investment_monitor.storage import (
+        Thesis, ThesisStatus, get_recent_findings, save_thesis,
+    )
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "KNIFE", 8.0)
+        _seed_price(s, "KNIFE")
+    with get_session() as s:
+        f = get_recent_findings(s, min_score=4.0, max_age_days=3)[0]
+        save_thesis(s, Thesis(
+            symbol="KNIFE", narrative="x", conviction=0.0,
+            status=ThesisStatus.INVALIDATED.value,
+            evidence_refs={"confluence_finding_id": f.id},
+            last_evaluated_at=datetime.combine(TODAY, datetime.min.time()),
+        ))
+    with get_session() as s:
+        assert promote_confluence_findings(s, min_score=4.0) == []

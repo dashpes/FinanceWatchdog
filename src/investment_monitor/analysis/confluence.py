@@ -89,7 +89,8 @@ class ConfluenceConfig(BaseModel):
     # token buyers shouldn't outrank 7 concentrated insiders).
     breadth_cap: int = Field(default=8, ge=1)
     value_weight: float = Field(default=0.5, ge=0)    # per-actor dollar conviction
-    source_bonus: float = Field(default=0.75, ge=0)   # each extra distinct source
+    source_bonus: float = Field(default=0.75, ge=0)   # each extra STRONG source (insider/volume)
+    news_bonus: float = Field(default=0.25, ge=0)     # news is weak: a smaller bonus, never a qualifier
     recency_halflife_days: float = Field(default=14.0, gt=0)
     recency_floor: float = Field(default=0.25, ge=0, le=1.0)
     exclude_entities: bool = True
@@ -110,6 +111,7 @@ def score_confluence(
     breadth_cap: int = 8,
     value_weight: float = 0.5,
     source_bonus: float = 0.75,
+    news_bonus: float = 0.25,
     recency_halflife_days: float = 14.0,
     recency_floor: float = 0.25,
 ) -> dict:
@@ -131,7 +133,11 @@ def score_confluence(
         by_actor[(e.source, e.actor)] += max(0.0, e.value or 0.0)
     n_actors = len(by_actor)
     sources = {e.source for e in evidence}
+    # News is weak/non-directional context: it never counts as a "strong" corroborating
+    # source, so it can't flip the one-day-event penalty or satisfy the cluster gate.
+    strong_sources = {s for s in sources if s != "news"}
     n_sources = len(sources)
+    n_strong = len(strong_sources)
     total_value = sum(max(0.0, e.value or 0.0) for e in evidence)
     median_per_actor = median(sorted(by_actor.values())) if by_actor else 0.0
 
@@ -144,18 +150,21 @@ def score_confluence(
 
     breadth = min(n_actors, breadth_cap)
     conviction = 1.0 + value_weight * math.log10(1.0 + max(0.0, median_per_actor) / 5000.0)
-    if n_sources > 1:
-        dispersion = 1.0  # cross-source agreement is itself non-routine
+    if n_strong > 1:
+        dispersion = 1.0  # multiple STRONG sources agreeing is itself non-routine
     else:
         ratio = (distinct_days / n_actors) if n_actors else 0.0
         dispersion = min(1.0, max(0.4, ratio * 2.0))  # all filed one day -> 0.4
-    source_mult = 1.0 + source_bonus * (n_sources - 1)
+    # Strong sources beyond the first add the full bonus; news adds only a small one.
+    source_mult = (
+        1.0 + source_bonus * max(0, n_strong - 1) + (news_bonus if "news" in sources else 0.0)
+    )
     score = breadth * conviction * dispersion * recency * source_mult
 
     return {
-        "n_sources": n_sources, "n_actors": n_actors, "total_value": total_value,
-        "median_per_actor": median_per_actor, "distinct_days": distinct_days,
-        "score": score, "newest": newest,
+        "n_sources": n_sources, "n_actors": n_actors, "n_strong": n_strong,
+        "total_value": total_value, "median_per_actor": median_per_actor,
+        "distinct_days": distinct_days, "score": score, "newest": newest,
     }
 
 
@@ -343,10 +352,14 @@ def detect_confluence(
         stats = score_confluence(
             evs, today=today, breadth_cap=config.breadth_cap,
             value_weight=config.value_weight, source_bonus=config.source_bonus,
+            news_bonus=config.news_bonus,
             recency_halflife_days=config.recency_halflife_days,
             recency_floor=config.recency_floor,
         )
-        breadth_ok = stats["n_actors"] >= config.min_actors or stats["n_sources"] >= 2
+        # A real finding needs >= min_actors INSIDERS, or >= 2 STRONG sources
+        # (insider + volume). News alone can corroborate but never qualify a name.
+        insider_actors = len({e.actor for e in evs if e.source == "insider"})
+        breadth_ok = insider_actors >= config.min_actors or stats["n_strong"] >= 2
         if not breadth_ok or stats["total_value"] < config.min_total_value:
             continue
         if stats["score"] < config.min_score:
