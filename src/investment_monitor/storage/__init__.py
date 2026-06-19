@@ -104,6 +104,16 @@ from .learning_operations import (
     record_learning_event,
     record_thesis_outcome,
 )
+from .insight_models import (
+    FINDING_INSIDER_CLUSTER,
+    FINDING_MULTI_SOURCE,
+    ConfluenceFinding,
+)
+from .insight_operations import (
+    finding_exists_for_date,
+    get_recent_findings,
+    save_finding,
+)
 
 __all__ = [
     # Database
@@ -206,6 +216,13 @@ __all__ = [
     "outcome_exists_for_date",
     "accuracy_stats_for_symbol",
     "outcome_metrics",
+    # Confluence / insight engine
+    "ConfluenceFinding",
+    "FINDING_INSIDER_CLUSTER",
+    "FINDING_MULTI_SOURCE",
+    "save_finding",
+    "finding_exists_for_date",
+    "get_recent_findings",
     # Semantic memory (Phase 5)
     "MemoryEmbedding",
     "save_embedding",

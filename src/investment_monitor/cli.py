@@ -74,11 +74,12 @@ Cron examples:
     parser.add_argument(
         "--type",
         "-t",
-        choices=["regular", "digest", "weekly", "collect-broad"],
+        choices=["regular", "digest", "weekly", "collect-broad", "insights"],
         default="regular",
         help="Type of run: regular (collect data, check alerts), "
         "digest (daily summary), weekly (AI synthesis), "
-        "collect-broad (market-wide event ingestion, universe-independent). "
+        "collect-broad (market-wide event ingestion, universe-independent), "
+        "insights (run the confluence engine over collected data). "
         "Default: regular",
     )
 
@@ -159,6 +160,23 @@ def main(argv: list[str] | None = None) -> int:
             for r in results:
                 print(str(r))
         return 0 if all(r.success for r in results) else 1
+
+    # Confluence/insight engine: turn collected data into stated cross-source insights.
+    if args.type == "insights":
+        from investment_monitor.analysis.confluence import run_confluence
+
+        try:
+            findings = run_confluence()
+        except Exception as e:  # noqa: BLE001
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if not findings:
+            print("No confluence findings.")
+        else:
+            print(f"{len(findings)} confluence finding(s):\n")
+            for f in findings:
+                print(f"  [{f['score']:>5.1f}] {f['narrative']}")
+        return 0
 
     try:
         # Run the monitor
