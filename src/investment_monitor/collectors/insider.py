@@ -561,21 +561,23 @@ class InsiderCollector(BaseCollector):
                     except ValueError:
                         pass
 
-            # Get transaction type (A=Acquisition/P=Purchase, D=Disposition/S=Sale)
+            # Get transaction type. raw_code is the actual SEC code (P/S/A/M/F/...);
+            # transaction_type is the collapsed buy/sell kept for the legacy signal path.
             transaction_type = "P"  # Default to purchase
+            raw_code: str | None = None
             coding = txn_elem.find("transactionCoding")
             if coding:
                 code = coding.find("transactionCode")
                 if code and code.text:
-                    code_text = code.text.strip().upper()
+                    raw_code = code.text.strip().upper()
                     # P = Purchase, S = Sale, A = Award/Grant, D = Sale (disposition)
                     # M = Exercise of derivative
-                    if code_text in ("S", "D"):
+                    if raw_code in ("S", "D"):
                         transaction_type = "S"
-                    elif code_text in ("P", "A", "M"):
+                    elif raw_code in ("P", "A", "M"):
                         transaction_type = "P"
                     else:
-                        transaction_type = code_text
+                        transaction_type = raw_code
 
             # Get shares
             shares = 0
@@ -607,9 +609,9 @@ class InsiderCollector(BaseCollector):
             if shares and price_per_share:
                 total_value = shares * price_per_share
 
-            # Create unique sec_url for this specific transaction
-            # Use base URL + transaction details for uniqueness
-            sec_url = f"{base_sec_url}#{owner_name}_{trade_date}_{transaction_type}_{shares}"
+            # Create unique sec_url for this specific transaction. Use the RAW code so
+            # a same-day purchase (P) and grant (A) of equal size don't collide.
+            sec_url = f"{base_sec_url}#{owner_name}_{trade_date}_{raw_code or transaction_type}_{shares}"
 
             if shares == 0:
                 return None
@@ -621,6 +623,7 @@ class InsiderCollector(BaseCollector):
                 owner_name=owner_name,
                 owner_title=owner_title,
                 transaction_type=transaction_type,
+                raw_code=raw_code,
                 shares=shares,
                 price_per_share=price_per_share,
                 total_value=total_value,

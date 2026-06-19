@@ -151,7 +151,21 @@ async def test_broad_insider_parses_form4_market_wide(tmp_path):
         t = txns[0]
         assert t.ticker == "NVDA"      # derived from the FILING, not a configured universe
         assert t.transaction_type == "P" and t.shares == 1000
+        assert t.raw_code == "P"       # genuine open-market purchase preserved
         assert abs((t.price_per_share or 0) - 120.50) < 1e-9
+
+
+def test_form4_parser_preserves_raw_code():
+    # A grant (code A) collapses to transaction_type 'P' but must stay distinguishable
+    # via raw_code — else the confluence engine reads mass RSU grants as cluster-buying.
+    c = InsiderCollector.__new__(InsiderCollector)
+    award_xml = _FORM4_NVDA.replace(
+        "<transactionCode>P</transactionCode>", "<transactionCode>A</transactionCode>"
+    )
+    (grant,) = c._parse_form4(award_xml, None, "http://x#a")
+    assert grant.raw_code == "A" and grant.transaction_type == "P"
+    (buy,) = c._parse_form4(_FORM4_NVDA, None, "http://x#b")
+    assert buy.raw_code == "P" and buy.transaction_type == "P"
 
 
 def test_broad_insider_index_parse_filters_to_form4(tmp_path):
