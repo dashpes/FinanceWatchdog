@@ -431,7 +431,9 @@ class InsiderCollector(BaseCollector):
         if not ticker:
             sym = soup.find("issuerTradingSymbol")
             ticker = sym.text.strip().upper() if sym and sym.text else None
-            if not ticker:
+            # Some filings carry junk placeholders ('NONE'/'N/A'/'NA'/'--'/'') instead
+            # of a real symbol — treat those as no ticker so they never reach the DB.
+            if ticker in (None, "", "NONE", "N/A", "NA", "--"):
                 return []  # can't attribute a transaction without an issuer ticker
 
         # Extract owner information

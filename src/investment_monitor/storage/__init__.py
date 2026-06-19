@@ -114,6 +114,7 @@ from .insight_operations import (
     get_recent_findings,
     save_finding,
 )
+from .retention import RetentionConfig, prune_old_data
 
 __all__ = [
     # Database
@@ -223,6 +224,9 @@ __all__ = [
     "save_finding",
     "finding_exists_for_date",
     "get_recent_findings",
+    # Retention / cleanup
+    "RetentionConfig",
+    "prune_old_data",
     # Semantic memory (Phase 5)
     "MemoryEmbedding",
     "save_embedding",

@@ -20,14 +20,24 @@ from loguru import logger
 
 from investment_monitor.collectors.base import CollectorResult
 from investment_monitor.collectors.insider import InsiderCollector
+from investment_monitor.collectors.news import NewsCollector
+from investment_monitor.collectors.prices import PriceCollector
 from investment_monitor.config import Settings, get_settings
 from investment_monitor.storage import get_session, init_db
+
+# Price collection is bounded to the insider-active universe (the names confluence
+# cares about) and capped so the daily run stays fast.
+_PRICE_WINDOW_DAYS = 30
+_PRICE_MAX_TICKERS = 500
 
 
 async def run_broad_collection(
     settings: Settings | None = None, *, days_back: int = 1, limit: int | None = None
 ) -> list[CollectorResult]:
     """Run every broad (universe-independent) collector, returning their results.
+
+    Order matters: insider first (it defines the relevant universe), then prices for
+    that universe (volume-spike confluence + price context), then market-wide news.
 
     Args:
         settings: app settings (defaults to ``get_settings()``).
@@ -39,9 +49,21 @@ async def run_broad_collection(
 
     results: list[CollectorResult] = []
     with get_session() as session:
-        # SEC Form 4 insider transactions, retained market-wide (free, authoritative).
+        # 1. SEC Form 4 insider transactions, retained market-wide (free, authoritative).
         insider = InsiderCollector(session, settings)
         results.append(await insider.collect_all(days_back=days_back, limit=limit))
+
+        # 2. Daily OHLCV for the insider-active universe (foundation for volume-spike
+        #    confluence + price context). No-op on a fresh DB with no insider rows.
+        prices = PriceCollector(session, settings)
+        results.append(await prices.collect_all(
+            window_days=_PRICE_WINDOW_DAYS, max_tickers=_PRICE_MAX_TICKERS,
+        ))
+
+        # 3. Market-wide news (non-directional context).
+        news = NewsCollector(session, settings)
+        results.append(await news.collect_all())
+
         # Congress is DEFERRED: the free House/Senate Stock Watcher feed is dead. The
         # broad collect_all() + tests exist in CongressTradesCollector, ready to repoint
         # at a live source (House Clerk PTR PDFs or a paid API).

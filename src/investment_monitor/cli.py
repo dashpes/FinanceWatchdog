@@ -74,12 +74,13 @@ Cron examples:
     parser.add_argument(
         "--type",
         "-t",
-        choices=["regular", "digest", "weekly", "collect-broad", "insights"],
+        choices=["regular", "digest", "weekly", "collect-broad", "insights", "prune"],
         default="regular",
         help="Type of run: regular (collect data, check alerts), "
         "digest (daily summary), weekly (AI synthesis), "
         "collect-broad (market-wide event ingestion, universe-independent), "
-        "insights (run the confluence engine over collected data). "
+        "insights (run the confluence engine over collected data), "
+        "prune (delete data older than the --*-days windows). "
         "Default: regular",
     )
 
@@ -105,6 +106,15 @@ Cron examples:
         action="store_true",
         help="Show what would be done without actually doing it",
     )
+
+    parser.add_argument("--insider-days", type=int, default=0,
+                        help="For --type prune: delete insider rows older than N days (0=keep all).")
+    parser.add_argument("--news-days", type=int, default=0,
+                        help="For --type prune: delete news rows older than N days (0=keep all).")
+    parser.add_argument("--price-days", type=int, default=0,
+                        help="For --type prune: delete price rows older than N days (0=keep all).")
+    parser.add_argument("--findings-days", type=int, default=0,
+                        help="For --type prune: delete findings older than N days (0=keep all).")
 
     parser.add_argument(
         "--days-back",
@@ -176,6 +186,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{len(findings)} confluence finding(s):\n")
             for f in findings:
                 print(f"  [{f['score']:>5.1f}] {f['narrative']}")
+        return 0
+
+    # Retention: delete data older than the requested per-source windows (0 = keep).
+    if args.type == "prune":
+        from investment_monitor.config import get_settings
+        from investment_monitor.storage import (
+            RetentionConfig, get_session, init_db, prune_old_data,
+        )
+
+        cfg = RetentionConfig(
+            insider_days=args.insider_days, news_days=args.news_days,
+            price_days=args.price_days, findings_days=args.findings_days,
+        )
+        try:
+            init_db(get_settings().db_path)
+            with get_session() as s:
+                deleted = prune_old_data(s, cfg)
+        except Exception as e:  # noqa: BLE001
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        print("Pruned:" if deleted else "Nothing to prune (all windows 0 / no old rows).")
+        for table, n in (deleted or {}).items():
+            print(f"  {table}: {n} rows deleted")
         return 0
 
     try:
