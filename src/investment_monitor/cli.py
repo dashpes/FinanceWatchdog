@@ -169,6 +169,18 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             for r in results:
                 print(str(r))
+        # Full pipeline: after collecting, detect cross-source confluence and promote
+        # the strongest findings to theses so the autonomous advisor trades them.
+        try:
+            from investment_monitor.robo.confluence_promotion import run_insight_promotion
+
+            outcome = run_insight_promotion()
+            if not args.quiet:
+                promoted = ", ".join(outcome["promoted"]) or "(none)"
+                print(f"insights: {outcome['findings']} findings; "
+                      f"promoted {len(outcome['promoted'])} to theses: {promoted}")
+        except Exception as e:  # noqa: BLE001 - insight pipeline must not fail collection
+            print(f"insight pipeline warning: {e}", file=sys.stderr)
         return 0 if all(r.success for r in results) else 1
 
     # Confluence/insight engine: turn collected data into stated cross-source insights.

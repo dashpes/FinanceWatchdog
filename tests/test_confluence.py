@@ -227,3 +227,24 @@ def test_price_context_set_on_finding(tmp_path):
         r = [f for f in findings if f.ticker == "RISE"][0]
         assert r.price_change_pct is not None and r.price_change_pct > 15
         assert "% since buys" in r.narrative
+
+
+def test_news_evidence_requires_min_items(tmp_path):
+    from datetime import datetime
+
+    from investment_monitor.analysis.confluence import gather_news_evidence
+    from investment_monitor.storage import NewsItem
+
+    init_db(tmp_path / "n.db")
+    with get_session() as s:
+        for i in range(3):
+            s.add(NewsItem(ticker="NWS", headline=f"h{i}", source="x",
+                           url=f"http://n/{i}", published_at=datetime(2026, 6, 17, 12, 0)))
+        s.add(NewsItem(ticker="ONE", headline="h", source="x", url="http://one",
+                       published_at=datetime(2026, 6, 17, 12, 0)))
+    with get_session() as s:
+        ev = gather_news_evidence(s, {"NWS", "ONE"}, TODAY, window_days=30, min_items=2)
+    tickers = {e.ticker for e in ev}
+    assert "NWS" in tickers       # 3 headlines >= min_items
+    assert "ONE" not in tickers   # 1 headline < min_items
+    assert all(e.source == "news" for e in ev)

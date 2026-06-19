@@ -35,6 +35,7 @@ from investment_monitor.storage import (
     InsiderTransaction,
     finding_exists_for_date,
     get_prices,
+    get_recent_news,
     get_session,
     init_db,
     save_finding,
@@ -97,6 +98,9 @@ class ConfluenceConfig(BaseModel):
     volume_spike_multiple: float = Field(default=2.0, gt=1.0)
     volume_lookback: int = Field(default=20, ge=5)
     volume_min_avg: float = Field(default=50_000.0, ge=0)
+    # News third source (weak, non-directional corroboration). Only for insider-active
+    # tickers; requires >= this many recent headlines to count as a source.
+    news_min_items: int = Field(default=2, ge=1)
 
 
 def score_confluence(
@@ -229,6 +233,32 @@ def gather_volume_evidence(
     return out
 
 
+def gather_news_evidence(
+    session, tickers: set[str], today: date, *, window_days: int = 30, min_items: int = 2,
+) -> list[Evidence]:
+    """News-flow Evidence — a weak THIRD source — for insider-active tickers.
+
+    Non-directional: a burst of recent headlines on a name that insiders are buying is
+    corroborating attention, not a buy/sell signal. Requires >= ``min_items`` recent
+    headlines to count, so a single stray article doesn't manufacture a source.
+    """
+    out: list[Evidence] = []
+    for ticker in tickers:
+        try:
+            items = get_recent_news(session, ticker=ticker, hours=window_days * 24)
+            if len(items) < min_items:
+                continue
+            latest = max((i.published_at.date() for i in items if i.published_at),
+                         default=today)
+            out.append(Evidence(
+                ticker=ticker, source="news", actor="news_flow", date=latest,
+                value=None, detail=f"{len(items)} recent headlines",
+            ))
+        except Exception as exc:  # noqa: BLE001 - news is best-effort context
+            logger.debug(f"news evidence failed for {ticker}: {exc}")
+    return out
+
+
 def _price_change_since(session, ticker: str, since: date, today: date) -> float | None:
     """Percent return from the close on/before ``since`` to the latest close (or None)."""
     try:
@@ -298,7 +328,11 @@ def detect_confluence(
         session, active_tickers, today, spike_multiple=config.volume_spike_multiple,
         lookback=config.volume_lookback, min_avg_volume=config.volume_min_avg,
     )
-    evidence = insider_ev + volume_ev
+    news_ev = gather_news_evidence(
+        session, active_tickers, today,
+        window_days=config.window_days, min_items=config.news_min_items,
+    )
+    evidence = insider_ev + volume_ev + news_ev
 
     by_ticker: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence:
