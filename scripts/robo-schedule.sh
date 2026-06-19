@@ -16,10 +16,12 @@ set -euo pipefail
 
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 WRAP="$PROJ/scripts/robo-cron.sh"
+BROAD_WRAP="$PROJ/scripts/broad-collect-cron.sh"
 AGENTS="$HOME/Library/LaunchAgents"
 RESEARCH="com.financewatchdog.robo-research"
 TRADE="com.financewatchdog.robo-trade"
 OLLAMA_ENV="com.financewatchdog.ollama-env"
+BROAD="com.financewatchdog.broad-collect"
 
 write_ollama_env_plist() {
   # Re-apply the Ollama RAM guardrails on every login (launchctl setenv does not
@@ -85,24 +87,46 @@ $(printf "%b" "$entries")  </array>
 PLIST
 }
 
+write_broad_collect_plist() {
+  # Broad market-wide event ingestion (SEC Form 4 today; more sources later). Daily
+  # at 04:30 PT so fresh data is in the DB before the 05:00 research run. No Ollama.
+  # --days-back 3 catches up to ~2 missed days; dedup makes the overlap a no-op.
+  cat > "$AGENTS/$BROAD.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$BROAD</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$BROAD_WRAP</string><string>--days-back</string><string>3</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>StandardOutPath</key><string>$PROJ/logs/launchd-broad-collect.log</string>
+  <key>StandardErrorPath</key><string>$PROJ/logs/launchd-broad-collect.log</string>
+</dict></plist>
+PLIST
+}
+
 cmd="${1:-status}"
 case "$cmd" in
   install)
     mkdir -p "$AGENTS" "$PROJ/logs"
-    chmod +x "$WRAP"
+    chmod +x "$WRAP" "$BROAD_WRAP"
     write_ollama_env_plist
     write_research_plist
     write_trade_plist
-    for label in "$OLLAMA_ENV" "$RESEARCH" "$TRADE"; do
+    write_broad_collect_plist
+    for label in "$OLLAMA_ENV" "$RESEARCH" "$TRADE" "$BROAD"; do
       launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
       launchctl load "$AGENTS/$label.plist"
       echo "loaded $label"
     done
     echo "Installed. Ollama RAM caps persist on boot. Research: 05:00 & 17:00 daily"
-    echo "(no-trade). Trade: 07:00 & 12:30 Mon-Fri (gated by market hours + open orders)."
+    echo "(no-trade). Trade: 07:00 & 12:30 Mon-Fri (gated). Broad collect: 04:30 daily."
     ;;
   uninstall)
-    for label in "$OLLAMA_ENV" "$RESEARCH" "$TRADE"; do
+    for label in "$OLLAMA_ENV" "$RESEARCH" "$TRADE" "$BROAD"; do
       launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
       rm -f "$AGENTS/$label.plist"
       echo "removed $label"

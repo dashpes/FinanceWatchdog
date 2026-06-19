@@ -106,6 +106,14 @@ Cron examples:
     )
 
     parser.add_argument(
+        "--days-back",
+        type=int,
+        default=1,
+        help="For --type collect-broad: recent business days of SEC indexes to "
+        "ingest (default 1; dedup makes overlap safe for catch-up).",
+    )
+
+    parser.add_argument(
         "--quiet",
         "-q",
         action="store_true",
@@ -143,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         from investment_monitor.broad_collect import run_broad_collection_sync
 
         try:
-            results = run_broad_collection_sync()
+            results = run_broad_collection_sync(days_back=args.days_back)
         except Exception as e:  # noqa: BLE001
             print(f"Error: {e}", file=sys.stderr)
             return 1
