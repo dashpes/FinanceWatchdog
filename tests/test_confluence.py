@@ -117,3 +117,56 @@ def test_detect_dedups_within_a_day(tmp_path):
         again = detect_confluence(s, ConfluenceConfig(min_actors=3), today=TODAY)
         assert again == []
         assert s.scalar(select(func.count()).select_from(ConfluenceFinding)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# v2: data-quality + concentration-aware scoring
+# --------------------------------------------------------------------------- #
+def test_entity_owners_excluded(tmp_path):
+    # Fund/entity 10%-holders are not individual-insider conviction — exclude them.
+    db = tmp_path / "i.db"
+    _seed(db, [
+        ("BIO", "Alice Smith", "P", 2, 60000),
+        ("BIO", "Bob Jones", "P", 2, 60000),
+        ("BIO", "RA Capital Management, L.P.", "P", 2, 5_000_000),
+    ])
+    with get_session() as s:
+        actors = {e.actor for e in gather_insider_evidence(s, 30, TODAY)}
+    assert "Alice Smith" in actors and "Bob Jones" in actors
+    assert not any("Capital" in a for a in actors)
+
+
+def test_duplicate_physical_transaction_deduped(tmp_path):
+    # Same Form 4 indexed under issuer + owner CIK lands as two rows; the engine must
+    # collapse it so dollars aren't double-counted.
+    db = tmp_path / "i.db"
+    _seed(db, [
+        ("DUP", "Alice", "P", 2, 100000),
+        ("DUP", "Alice", "P", 2, 100000),   # identical physical txn, second copy
+        ("DUP", "Bob", "P", 2, 100000),
+        ("DUP", "Cy", "P", 2, 100000),
+    ])
+    with get_session() as s:
+        ev = gather_insider_evidence(s, 30, TODAY)
+    assert len(ev) == 3                                  # Alice counted once
+    assert sum(e.value for e in ev) == 300000            # not 400000
+
+
+def test_dollar_floor_drops_trivial_clusters(tmp_path):
+    db = tmp_path / "i.db"
+    _seed(db, [("TINY", n, "P", 2, 2000) for n in ("A", "B", "C", "D")])  # $8k < floor
+    with get_session() as s:
+        assert detect_confluence(s, ConfluenceConfig(), today=TODAY) == []
+
+
+def test_concentration_beats_routine_breadth(tmp_path):
+    # MEGA: 10 insiders, one day, token buys (routine board-wide event).
+    # CONV:  5 insiders, spread over days, real money (genuine conviction cluster).
+    db = tmp_path / "i.db"
+    rows = [("MEGA", f"Filer{i}", "P", 5, 3000) for i in range(10)]
+    rows += [("CONV", f"Exec{i}", "P", 1 + i, 80000) for i in range(5)]
+    _seed(db, rows)
+    with get_session() as s:
+        scores = {f.ticker: f.score for f in detect_confluence(s, ConfluenceConfig(), today=TODAY)}
+    assert "CONV" in scores and "MEGA" in scores
+    assert scores["CONV"] > scores["MEGA"]   # conviction ranks above raw headcount
