@@ -212,6 +212,10 @@ class RoboConfig(BaseModel):
     rebalance_threshold: float = Field(default=0.05, ge=0, le=1.0)
     # Symbols the gate will allow trading. Defaults to target_allocation keys.
     allowlist: list[str] = Field(default_factory=list)
+    # Symbols the gate must never BUY (sells/exits always allowed). Operator-curated;
+    # the system also auto-learns broker-refused, un-buyable names into a separate
+    # persisted learned blocklist (see robo/blocklist.py). Union of both is enforced.
+    blocklist: list[str] = Field(default_factory=list)
 
     caps: RoboCaps = Field(default_factory=RoboCaps)
 
@@ -250,9 +254,9 @@ class RoboConfig(BaseModel):
     def _upper_symbols(cls, v: dict[str, float]) -> dict[str, float]:
         return {sym.upper(): weight for sym, weight in v.items()}
 
-    @field_validator("allowlist")
+    @field_validator("allowlist", "blocklist")
     @classmethod
-    def _upper_allowlist(cls, v: list[str]) -> list[str]:
+    def _upper_symbol_lists(cls, v: list[str]) -> list[str]:
         return [s.upper() for s in v]
 
     @model_validator(mode="after")

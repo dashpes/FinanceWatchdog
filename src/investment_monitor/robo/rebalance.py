@@ -27,12 +27,13 @@ from loguru import logger
 
 from investment_monitor.config import Settings
 from investment_monitor.robo.audit import AuditLogger
+from investment_monitor.robo.blocklist import add_learned, is_unbuyable_message, load_learned
 from investment_monitor.robo.broker import BrokerError, PublicBroker, fill_from_order_raw
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
 from investment_monitor.robo.market_hours import is_market_open
-from investment_monitor.robo.models import AccountState, GateDecision
+from investment_monitor.robo.models import AccountState, GateDecision, OrderSide
 from investment_monitor.robo.signals import fetch_signals
 from investment_monitor.storage import (
     RoboOrder,
@@ -300,10 +301,14 @@ def rebalance_run(
         save_robo_run(session, run_row)
 
         # --- 6. Guardrail gate ---------------------------------------------------
+        # Blocklist = operator's static list ∪ the learned set of broker-refused,
+        # un-buyable names. Blocklisted BUYs are rejected before the position-cap
+        # check, so a perpetually-un-buyable pick can never strand the open slot.
+        blocklist = {s.upper() for s in config.blocklist} | load_learned(settings.db_path)
         orders_today = count_placed_orders_today(session)
         decisions = validate_orders(
             orders, account, gate_config, prices, orders_today=orders_today,
-            active_symbols=active_symbols, halt_buys=halt_buys,
+            active_symbols=active_symbols, blocklist=blocklist, halt_buys=halt_buys,
         )
 
         num_accepted = num_rejected = num_placed = 0
@@ -339,6 +344,10 @@ def rebalance_run(
                     audit.order_result(order, simulated=False, placed=False,
                                        detail=f"preflight failed: {preflight.message}")
                     save_robo_order(session, order_row)
+                    # Learn un-buyable names (e.g. "only available when closing a
+                    # position") so they stop winning the open slot every run.
+                    if order.side is OrderSide.BUY and is_unbuyable_message(preflight.message):
+                        add_learned(settings.db_path, order.symbol, preflight.message or "")
                     continue
 
                 # --- 8. Place or simulate ---------------------------------------
@@ -367,6 +376,8 @@ def rebalance_run(
                         logger.error("Order placement failed for {s}: {e}", s=order.symbol, e=exc)
                         audit.order_result(order, simulated=False, placed=False, detail=str(exc))
                         save_robo_order(session, order_row)
+                        if order.side is OrderSide.BUY and is_unbuyable_message(str(exc)):
+                            add_learned(settings.db_path, order.symbol, str(exc))
                     else:
                         order_row.placed = True
                         order_row.broker_order_id = placed.order_id

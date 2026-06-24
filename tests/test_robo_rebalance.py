@@ -219,3 +219,30 @@ def test_run_snapshot_unrealized_none_without_cost_basis(tmp_path):
     init_db(tmp_path / "test.db")
     with get_session() as session:
         assert get_recent_robo_runs(session, limit=1)[0].unrealized_pnl is None
+
+
+class _UnbuyableBroker(FakeBroker):
+    """Broker whose preflight refuses everything as un-buyable (e.g. close-only)."""
+
+    def preflight(self, order):
+        self.preflight_called += 1
+        return PreflightResult(
+            ok=False,
+            estimated_cost=order.notional or Decimal("0"),
+            margin_requirement=Decimal("0"),
+            message="API Error 400: This asset is currently only available for "
+            "trading when closing an existing position on Public.",
+        )
+
+
+def test_unbuyable_preflight_failure_is_learned_into_blocklist(tmp_path):
+    from investment_monitor.robo.blocklist import load_learned
+
+    settings = make_settings(tmp_path)
+    broker = _UnbuyableBroker(cash_account("100"))
+    result = rebalance_run(make_config(), settings, broker=broker)
+
+    # Proposed buys all fail preflight -> none placed, but the names are learned.
+    assert result.num_placed == 0
+    learned = load_learned(str(settings.db_path))
+    assert {"VOO", "SCHD"} <= learned  # both refused buys recorded

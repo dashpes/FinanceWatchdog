@@ -20,6 +20,14 @@ import typer
 from investment_monitor.config import get_settings
 from investment_monitor.robo.broker import BrokerError, PublicBroker
 from investment_monitor.robo.config import RoboConfig
+from investment_monitor.robo.notify import (
+    format_daily_summary,
+    notifications_configured,
+    notify_error,
+    notify_run,
+    send_daily_summary,
+    send_test,
+)
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
     accuracy_stats_for_symbol,
@@ -152,9 +160,11 @@ def run(
     try:
         result = rebalance_run(cfg, settings, dry_run_override=override)
     except BrokerError as exc:
+        notify_error(settings, message=str(exc), dry_run=override)
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
+    notify_run(result, settings)
     typer.echo(result.summary_line())
     if result.status == "refused":
         typer.secho(f"Refused: {result.message}", fg=typer.colors.RED, err=True)
@@ -274,9 +284,11 @@ def thesis_run(
     try:
         result = rebalance_run(auto_cfg, settings, dry_run_override=(True if dry_run else None))
     except BrokerError as exc:
+        notify_error(settings, message=str(exc), dry_run=True if dry_run else None)
         typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
+    notify_run(result, settings)
     typer.echo(result.summary_line())
     if result.status in ("refused", "failed"):
         typer.secho(f"{result.status}: {result.message}", fg=typer.colors.RED, err=True)
@@ -392,6 +404,78 @@ def pnl(
 
     if realized_total is not None and total_unrl is not None:
         typer.echo(f"Total P&L:      ${realized_total + total_unrl:+.2f}  (realized + unrealized)")
+
+
+@app.command("daily-summary")
+def daily_summary(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+) -> None:
+    """Text a daily portfolio + P&L summary via iMessage (and print it).
+
+    Read-only: fetches live account state from the broker, never trades. Intended to
+    run once a day after the close (see scripts/robo-schedule.sh). A no-op delivery
+    when IMESSAGE_TO is unset — the summary still prints.
+    """
+    settings = get_settings()
+    cfg = _load_config(config)
+    broker = PublicBroker(
+        api_token=settings.public_api_token,
+        account_id=cfg.account_id,
+        base_url=settings.public_api_base_url,
+        dry_run=True,
+    )
+    try:
+        account = broker.get_account_state()
+    except BrokerError as exc:
+        # A broken summary run is itself worth knowing about.
+        notify_error(settings, message=f"daily-summary: {exc}")
+        typer.secho(f"ERROR: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    realized = None
+    try:
+        from investment_monitor.robo.pnl import realized_pnl
+
+        realized = realized_pnl(broker.get_transactions())
+    except Exception as exc:  # noqa: BLE001 - realized P&L is best-effort, never required
+        typer.secho(f"(realized P&L unavailable: {exc})", fg=typer.colors.YELLOW)
+
+    typer.echo(format_daily_summary(account, realized))
+    sent = send_daily_summary(settings, account, realized)
+    if notifications_configured(settings) and not sent:
+        typer.secho(
+            "(summary not sent — check notification config / logs)",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@app.command("notify-test")
+def notify_test() -> None:
+    """Send a test notification (email or iMessage) to confirm the channel is wired up."""
+    settings = get_settings()
+    email_on = bool((settings.smtp_host or "").strip() and (settings.email_to or "").strip())
+    imsg_on = bool((settings.imessage_to or "").strip())
+    if not (email_on or imsg_on):
+        typer.secho(
+            "No notification channel configured. Set SMTP_HOST + EMAIL_TO (email, "
+            "recommended) or IMESSAGE_TO (iMessage) in .env.",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=1)
+
+    channel, target = ("email", settings.email_to) if email_on else ("iMessage", settings.imessage_to)
+    if send_test(settings):
+        typer.secho(f"Sent test {channel} to {target}.", fg=typer.colors.GREEN)
+    else:
+        hint = (
+            "Check SMTP_HOST/PORT/USERNAME/PASSWORD (Gmail needs an App Password) and logs."
+            if email_on
+            else "Grant Automation permission to the runner (System Settings > Privacy & "
+            "Security > Automation) and ensure Messages.app is signed in."
+        )
+        typer.secho(f"Failed to send {channel}. {hint}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+        raise typer.Exit(code=1)
 
 
 @app.command("learning")

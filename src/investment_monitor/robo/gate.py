@@ -23,6 +23,7 @@ Autonomous-mode guards (Phase 4; additive — each only fires when its parameter
 is enabled, so rebalance mode is unaffected). Buys are restricted; SELLS are always
 allowed so positions can be exited:
   * drawdown_breaker     — portfolio drawdown breaker active -> no new buys
+  * blocklisted          — buy of a symbol on the static/learned blocklist (un-buyable)
   * no_active_thesis     — buy of a symbol with no live thesis (autonomous mode)
   * open_order_exists    — symbol already has an in-flight order at the broker
   * exceeds_per_name_cap — post-buy position value exceeds max_per_name_weight
@@ -85,6 +86,7 @@ def validate(
     available_cash: Decimal | None = None,
     held_quantity: Decimal | None = None,
     active_symbols: set[str] | None = None,
+    blocklist: set[str] | None = None,
     halt_buys: bool = False,
     extra_positions: int = 0,
     turnover_remaining: Decimal | None = None,
@@ -147,6 +149,20 @@ def validate(
     if order.symbol not in config.allowlist:
         return GateDecision.reject(
             order, "symbol_not_allowed", f"{order.symbol} is not on the allowlist",
+        )
+
+    # 5a. Blocklist: never BUY a symbol the operator or the learned blocklist has
+    # banned (e.g. a broker-refused, un-buyable name). Checked before the position/
+    # cash guards so a blocklisted pick can never consume a slot or cash budget.
+    # SELLS are always allowed, so a blocklisted name already held can still be exited.
+    if (
+        order.side is OrderSide.BUY
+        and blocklist is not None
+        and order.symbol in blocklist
+    ):
+        return GateDecision.reject(
+            order, "blocklisted",
+            f"{order.symbol} is blocklisted for buys (un-buyable / operator-banned)",
         )
 
     # 5b. Autonomous mode: a BUY requires a live thesis for the symbol. ``active_symbols``
@@ -281,6 +297,7 @@ def validate_orders(
     *,
     orders_today: int = 0,
     active_symbols: set[str] | None = None,
+    blocklist: set[str] | None = None,
     halt_buys: bool = False,
 ) -> list[GateDecision]:
     """Validate a batch of orders for one run, threading shared limits safely.
@@ -317,6 +334,7 @@ def validate_orders(
             available_cash=available_cash,
             held_quantity=held.get(order.symbol, Decimal("0")),
             active_symbols=active_symbols,
+            blocklist=blocklist,
             halt_buys=halt_buys,
             extra_positions=len(new_names),
             turnover_remaining=turnover_remaining,

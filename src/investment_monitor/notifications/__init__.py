@@ -37,6 +37,8 @@ from .base import AlertMessage, NotificationChannel, Priority
 from .console import ConsoleChannel
 from .digest import format_daily_digest, format_weekly_digest
 from .discord import DiscordChannel
+from .email import EmailChannel
+from .imessage import IMessageChannel
 from .manager import NotificationManager
 from .pdf_report import PDFReportGenerator
 
@@ -44,6 +46,8 @@ __all__ = [
     "AlertMessage",
     "ConsoleChannel",
     "DiscordChannel",
+    "EmailChannel",
+    "IMessageChannel",
     "NotificationChannel",
     "NotificationManager",
     "PDFReportGenerator",
