@@ -234,7 +234,7 @@ class InsiderCollector(BaseCollector):
     def _is_trading_day(self, d: date) -> bool:
         """True if ``d`` is a US-market trading day (weekday and not a known holiday).
 
-        Reuses ``market_hours``' hardcoded NYSE holiday calendar when importable so
+        Reuses ``market_hours``' public NYSE trading-day calendar when importable so
         the holiday knowledge has a single source of truth; if that import is
         unavailable for any reason we fail OPEN (weekday-only) — over-covering a
         holiday index is harmless (a missing index is skipped), but skipping a real
@@ -243,10 +243,10 @@ class InsiderCollector(BaseCollector):
         if d.weekday() >= 5:  # Sat / Sun
             return False
         try:
-            from ..robo.market_hours import _HOLIDAYS
+            from ..robo.market_hours import is_trading_day
         except Exception:  # noqa: BLE001 - fail open: weekend filter still applies
             return True
-        return d not in _HOLIDAYS
+        return is_trading_day(d)
 
     def _recent_business_dates(self, days_back: int) -> list[date]:
         """The most recent TRADING days with filings (newest first).
