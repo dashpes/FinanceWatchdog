@@ -23,6 +23,11 @@ allowlist:
   - VOO
   - SCHD
 
+# Symbols the gate must never BUY (sells/exits are always allowed). Operator-curated;
+# the system also auto-learns broker-refused, un-buyable names into a persisted
+# learned blocklist (data/robo_blocklist.json). The union of both is enforced.
+blocklist: []
+
 # Rate / size caps enforced deterministically by the guardrail gate.
 caps:
   max_order_pct: 0.25       # max single-order notional as a fraction of portfolio value

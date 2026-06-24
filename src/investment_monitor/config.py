@@ -65,6 +65,28 @@ class Settings(BaseSettings):
     discord_daily_webhook_url: str = ""
     discord_weekly_webhook_url: str = ""
 
+    # iMessage (macOS only) — the robo advisor texts you on live trades, run
+    # errors, and a daily summary. Recipient is your phone number (e.g.
+    # +15551234567) or the Apple ID email registered with iMessage. Blank = off.
+    imessage_to: str = ""
+    # Also notify on paper/dry-run placements. Off by default to avoid noise; live
+    # trades and run errors always notify regardless of this flag.
+    imessage_notify_paper: bool = False
+
+    # Email (SMTP) notifications — a headless transport for the robo advisor that
+    # works from a background launchd daemon (no GUI, no Messages.app, no Automation
+    # grant), unlike iMessage. Used for live trades, run errors, and the daily
+    # summary, and PREFERRED over iMessage when configured. Blank smtp_host or
+    # email_to disables it. Gmail: SMTP_HOST=smtp.gmail.com, SMTP_PORT=587, and an
+    # App Password (not your login password) as SMTP_PASSWORD.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    email_from: str = ""  # falls back to smtp_username when blank
+    email_to: str = ""
+    email_use_tls: bool = True
+
     # Ollama
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"

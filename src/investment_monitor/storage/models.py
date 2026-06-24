@@ -58,6 +58,11 @@ class InsiderTransaction(Base):
     owner_name: Mapped[str] = mapped_column(String(200), nullable=False)
     owner_title: Mapped[str] = mapped_column(String(100), nullable=True)
     transaction_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Raw SEC Form 4 transaction code (P=open-market purchase, S=sale, A=award/grant,
+    # M=option exercise, F=tax withholding, ...). transaction_type collapses these to
+    # P/S for the legacy signal path; raw_code preserves the distinction so the
+    # confluence engine can isolate GENUINE buys (P) from grants/exercises.
+    raw_code: Mapped[str | None] = mapped_column(String(4), nullable=True, index=True)
     shares: Mapped[int] = mapped_column(Integer, nullable=False)
     price_per_share: Mapped[float] = mapped_column(Float, nullable=True)
     total_value: Mapped[float] = mapped_column(Float, nullable=True)

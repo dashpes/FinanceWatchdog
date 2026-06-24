@@ -67,6 +67,7 @@ from .robo_operations import (
     finalize_robo_run,
     get_recent_robo_runs,
     get_robo_orders_for_run,
+    get_unfilled_placed_orders,
     save_robo_order,
     save_robo_run,
 )
@@ -103,6 +104,17 @@ from .learning_operations import (
     record_learning_event,
     record_thesis_outcome,
 )
+from .insight_models import (
+    FINDING_INSIDER_CLUSTER,
+    FINDING_MULTI_SOURCE,
+    ConfluenceFinding,
+)
+from .insight_operations import (
+    finding_exists_for_date,
+    get_recent_findings,
+    save_finding,
+)
+from .retention import RetentionConfig, prune_old_data
 
 __all__ = [
     # Database
@@ -179,6 +191,7 @@ __all__ = [
     "save_robo_order",
     "get_recent_robo_runs",
     "get_robo_orders_for_run",
+    "get_unfilled_placed_orders",
     "count_placed_orders_today",
     # Thesis store (autonomous investor)
     "Thesis",
@@ -204,6 +217,16 @@ __all__ = [
     "outcome_exists_for_date",
     "accuracy_stats_for_symbol",
     "outcome_metrics",
+    # Confluence / insight engine
+    "ConfluenceFinding",
+    "FINDING_INSIDER_CLUSTER",
+    "FINDING_MULTI_SOURCE",
+    "save_finding",
+    "finding_exists_for_date",
+    "get_recent_findings",
+    # Retention / cleanup
+    "RetentionConfig",
+    "prune_old_data",
     # Semantic memory (Phase 5)
     "MemoryEmbedding",
     "save_embedding",

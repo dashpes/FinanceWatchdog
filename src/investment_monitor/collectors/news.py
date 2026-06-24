@@ -1,8 +1,8 @@
 """News collector that aggregates RSS feeds for portfolio tickers."""
 
+import calendar
 import re
-from datetime import datetime
-from time import mktime
+from datetime import datetime, timezone
 from typing import Any
 
 import feedparser
@@ -10,6 +10,7 @@ from loguru import logger
 
 from ..storage import NewsItem, news_exists, save_news_item
 from .base import BaseCollector, CollectorResult
+from .insider import JUNK_CASHTAGS, is_junk_ticker
 
 
 class NewsCollector(BaseCollector):
@@ -130,6 +131,122 @@ class NewsCollector(BaseCollector):
         """
         result = await self.collect([ticker])
         return result.records_collected
+
+    # ----------------------------------------------------------------------- #
+    # Broad, universe-independent collection (market-wide news)
+    # ----------------------------------------------------------------------- #
+
+    # $AAPL / $BRK.B style cashtag — the universe-independent way feeds name an
+    # issuer. 1-5 letters with an optional .X class suffix keeps false positives
+    # (e.g. "$5", "$1,000") out while still catching real tickers.
+    CASHTAG_RE = re.compile(r"\$([A-Z]{1,5}(?:\.[A-Z]{1,2})?)\b")
+
+    async def collect_all(self) -> CollectorResult:
+        """Retain market-wide news instead of filtering to a configured universe.
+
+        ``collect(tickers)`` fetches broad RSS then NARROWS to the passed tickers;
+        this broad variant keeps EVERY item with a resolvable ticker — the
+        non-directional market context the insight engine wants (what is the WHOLE
+        market reacting to, not just names we already hold?). Only the
+        universe-independent feeds (``per_ticker`` is False) are fetched, since a
+        per-ticker template needs a universe to fill in. Tickers are resolved from
+        the item's own cashtags, deduped by ``NewsItem.url`` (unique), added without
+        per-row flush, then committed once. Each feed fails open.
+        """
+        started_at = datetime.now()
+        records = 0
+        errors: list[str] = []
+        seen_urls: set[str] = set()
+
+        broad_feeds = [f for f in self.feeds if not f.get("per_ticker", False)]
+        for feed_config in broad_feeds:
+            feed_name = feed_config["name"]
+            feed_url = feed_config["url"]
+            try:
+                added = self._retain_feed(feed_url, feed_name, seen_urls)
+                records += added
+                logger.info(f"{self.name}: retained {added} items from {feed_name} (broad, market-wide)")
+            except Exception as e:  # noqa: BLE001 - one feed failing must not abort the rest
+                error_msg = f"{feed_name} broad fetch failed: {str(e)}"
+                errors.append(error_msg)
+                logger.error(f"{self.name}: {error_msg}")
+
+        try:
+            self.session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.session.rollback()
+            error_msg = f"Failed to commit broad news: {str(e)}"
+            errors.append(error_msg)
+            logger.error(f"{self.name}: {error_msg}")
+
+        return CollectorResult(
+            collector_name=self.name,
+            success=len(errors) == 0,
+            records_collected=records,
+            errors=errors,
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
+
+    def _retain_feed(self, feed_url: str, feed_name: str, seen_urls: set[str]) -> int:
+        """Parse one broad feed and retain every item with a resolvable ticker.
+
+        Reuses the shared ``_parse_feed`` helper. A single item naming several
+        issuers (e.g. ``$AAPL`` and ``$MSFT``) is retained once per ticker, each
+        with a per-ticker url so the unique constraint never collides.
+        """
+        entries = self._parse_feed(feed_url)
+        added = 0
+        for entry in entries:
+            url = entry.get("link", "")
+            headline = entry.get("title", "")
+            if not url or not headline:
+                continue
+
+            text = f"{headline} {entry.get('summary', '')}"
+            tickers = self._extract_tickers(text)
+            if not tickers:
+                continue  # broad keeps items with a RESOLVABLE ticker, not all noise
+
+            published_at = self._parse_published_date(entry)
+            for ticker in tickers:
+                # Per-ticker url keeps the (unique) url distinct when one article
+                # names multiple issuers; dedup still collapses repeats market-wide.
+                row_url = url if len(tickers) == 1 else f"{url}#{ticker}"
+                if row_url in seen_urls:
+                    continue
+                seen_urls.add(row_url)
+                if news_exists(self.session, row_url):
+                    continue
+                self.session.add(  # no per-row flush; commit once in collect_all
+                    NewsItem(
+                        ticker=ticker,
+                        headline=headline,
+                        source=feed_name,
+                        url=row_url,
+                        published_at=published_at,
+                    )
+                )
+                added += 1
+        return added
+
+    def _extract_tickers(self, text: str) -> list[str]:
+        """Resolve issuer tickers from item text via cashtags (universe-independent).
+
+        Returns de-duplicated, order-preserving uppercase symbols. Unlike
+        ``_ticker_mentioned`` (which needs a candidate list), this discovers tickers
+        with no portfolio to match against — what "broad" requires. Junk cashtags
+        ($NONE/$NA/$USD/$CEO/$WSJ ...) are dropped via the shared junk-ticker filter
+        so non-issuer noise never becomes a NewsItem.ticker row that the confluence
+        engine would treat as corroboration.
+        """
+        out: list[str] = []
+        for sym in self.CASHTAG_RE.findall(text.upper()):
+            if is_junk_ticker(sym) or sym in JUNK_CASHTAGS:
+                continue
+            if sym not in out:
+                out.append(sym)
+        return out
 
     async def _process_feed(
         self,
@@ -277,24 +394,38 @@ class NewsCollector(BaseCollector):
         """
         Parse the publication date from a feed entry.
 
+        feedparser exposes ``*_parsed`` as a UTC ``struct_time``. We convert via
+        ``calendar.timegm`` (which treats the struct as UTC) and return a naive
+        UTC datetime — NOT ``time.mktime``/``fromtimestamp``, which would treat the
+        struct as LOCAL time and shift every timestamp by the host's UTC offset.
+        Storing naive UTC keeps ``published_at`` consistent with the retention prune
+        cutoff and the confluence recency window (both UTC-based).
+
         Args:
             entry: Feed entry dictionary
 
         Returns:
-            datetime object or None if parsing fails
+            datetime object (naive UTC) or None if parsing fails
         """
         # Try parsed time struct first
         if hasattr(entry, "published_parsed") and entry.published_parsed:
             try:
-                return datetime.fromtimestamp(mktime(entry.published_parsed))
+                return self._struct_to_utc(entry.published_parsed)
             except (TypeError, ValueError, OverflowError):
                 pass
 
         # Try updated_parsed as fallback
         if hasattr(entry, "updated_parsed") and entry.updated_parsed:
             try:
-                return datetime.fromtimestamp(mktime(entry.updated_parsed))
+                return self._struct_to_utc(entry.updated_parsed)
             except (TypeError, ValueError, OverflowError):
                 pass
 
         return None
+
+    @staticmethod
+    def _struct_to_utc(parsed: Any) -> datetime:
+        """Convert a feedparser UTC ``struct_time`` to a naive UTC ``datetime``."""
+        return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc).replace(
+            tzinfo=None
+        )

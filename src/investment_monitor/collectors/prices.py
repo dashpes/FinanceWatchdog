@@ -4,10 +4,11 @@ from datetime import date, datetime, timedelta
 
 import yfinance as yf
 from loguru import logger
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..storage import Price, get_prices, price_exists, save_price
+from ..storage import InsiderTransaction, Price, get_prices, price_exists, save_price
 from .base import BaseCollector, CollectorResult
 
 
@@ -83,6 +84,85 @@ class PriceCollector(BaseCollector):
             started_at=started_at,
             finished_at=finished_at,
         )
+
+    # ----------------------------------------------------------------------- #
+    # Broad, universe-independent collection (confluence-relevant tickers only)
+    # ----------------------------------------------------------------------- #
+    async def collect_all(
+        self, *, window_days: int = 30, max_tickers: int | None = None
+    ) -> CollectorResult:
+        """Collect daily OHLCV for the CONFLUENCE-RELEVANT universe (broad collection).
+
+        Unlike ``collect(tickers)``, this does NOT take a configured universe and does
+        NOT pull all ~8000 market tickers. It fetches prices for exactly the DISTINCT
+        tickers that recently showed up in ``insider_transactions`` (trade within the
+        last ``window_days``) — i.e. the names the insight engine actually needs price
+        context for (volume-spike + price confluence against insider clusters).
+
+        Reuses the existing per-ticker fetch path (``_batch_fetch``), which dedups via
+        Price's (ticker, date) unique constraint (skips existing), commits once, and
+        fails open per ticker.
+
+        Args:
+            window_days: insider trade_date lookback that defines the relevant universe.
+            max_tickers: optional cap on the number of tickers fetched this run.
+        """
+        started_at = datetime.now()
+        records_collected = 0
+        errors: list[str] = []
+
+        tickers = self._relevant_tickers(window_days=window_days, max_tickers=max_tickers)
+        logger.info(
+            f"{self.name}: {len(tickers)} confluence-relevant tickers to price "
+            f"(insider trades within {window_days}d)"
+        )
+
+        if not tickers:
+            return CollectorResult(
+                collector_name=self.name,
+                success=True,
+                records_collected=0,
+                errors=[],
+                started_at=started_at,
+                finished_at=datetime.now(),
+            )
+
+        try:
+            # _batch_fetch already skips existing (ticker, date) rows and commits once;
+            # per-ticker errors are appended without aborting the run (fail-open).
+            records_collected = await self._batch_fetch(tickers, errors)
+        except Exception as e:  # noqa: BLE001 - a batch failure must not crash broad collection
+            logger.exception(f"{self.name}: Broad batch fetch failed")
+            errors.append(f"Broad batch fetch error: {str(e)}")
+
+        return CollectorResult(
+            collector_name=self.name,
+            success=len(errors) == 0,
+            records_collected=records_collected,
+            errors=errors,
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
+
+    def _relevant_tickers(
+        self, *, window_days: int = 30, max_tickers: int | None = None
+    ) -> list[str]:
+        """DISTINCT tickers in insider_transactions with trade_date within window_days.
+
+        This is the confluence-relevant universe — we only need price/volume context for
+        names insiders are actually trading, NOT the whole market. Newest activity first
+        so ``max_tickers`` keeps the most recent names when capped.
+        """
+        cutoff = date.today() - timedelta(days=window_days)
+        stmt = (
+            select(InsiderTransaction.ticker)
+            .where(InsiderTransaction.trade_date >= cutoff)
+            .group_by(InsiderTransaction.ticker)
+            .order_by(func.max(InsiderTransaction.trade_date).desc())
+        )
+        if max_tickers is not None:
+            stmt = stmt.limit(max_tickers)
+        return [t for t in self.session.scalars(stmt) if t]
 
     async def _batch_fetch(
         self, tickers: list[str], errors: list[str]

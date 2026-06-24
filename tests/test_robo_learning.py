@@ -375,3 +375,85 @@ def test_outcome_block_failure_falls_back_to_base_prompt(tmp_path, monkeypatch):
         ThesisEvaluator(llm, cfg).evaluate(s, get_thesis(s, "VOO"))
     # The aggregate read blew up -> the whole block degrades to "" -> base prompt.
     assert llm.prompts and "Realized performance & track record:" not in llm.prompts[0]
+
+
+# --------------------------------------------------------------------------- #
+# F. Fill-cost reconciliation: the loop scores against the real broker fill
+#    (P&L pulled from the broker), not the quote captured when the idea opened.
+# --------------------------------------------------------------------------- #
+def test_fill_cost_preferred_over_entry_price_for_outcome(tmp_path):
+    # entry_price (idea quote) implies a WIN; the real fill cost implies a LOSS.
+    # The recorded outcome — and the displayed line — must follow the fill cost.
+    db = tmp_path / "t.db"
+    init_db(db)
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", conviction=0.5, narrative="old",
+                              status=ThesisStatus.ACTIVE.value,
+                              entry_conditions={"entry_price": 500.0, "fill_cost": 600.0}))
+        s.add(Price(ticker="VOO", date=date.today(), close=560.0))  # +12% vs quote, -6.7% vs fill
+    cfg = _autonomous_config(learning=LearningConfig(min_days_held=0))
+    llm = _RecordingLLM('{"narrative": "x", "conviction": 0.6}')
+    with get_session() as s:
+        ThesisEvaluator(llm, cfg).evaluate(s, get_thesis(s, "VOO"))
+    with get_session() as s:
+        stats = accuracy_stats_for_symbol(s, "VOO")
+        assert stats["n"] == 1 and stats["hit_rate"] == 0.0  # a loss against the real fill
+    assert "opened $600.00" in llm.prompts[0]  # the line shows the fill cost, not $500
+
+
+def test_reconcile_fill_costs_writes_broker_basis(tmp_path):
+    # fill_cost must be the thesis's OWN entry-order fill price (450, from the
+    # reconciled BUY), NOT the broker's blended unit cost (999 here) — the blend
+    # folds in pre-existing/independent shares and would bias calibration.
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    from investment_monitor.robo.models import AccountState, OrderSide, Position
+    from investment_monitor.robo.rebalance import _reconcile_fill_costs
+    from investment_monitor.storage import RoboOrder
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", account_id="ACC", conviction=0.5,
+                              status=ThesisStatus.ACTIVE.value,
+                              entry_conditions={"entry_price": 500.0}))
+        thesis_created = get_thesis(s, "VOO").created_at
+        # The robo's own opening BUY, reconciled to a real fill at $450 AFTER the idea.
+        s.add(RoboOrder(run_id="R1", symbol="VOO", side=OrderSide.BUY.value,
+                        order_type="MARKET", quantity=2.0, placed=True,
+                        broker_order_id="O1", fill_price=450.0, fill_quantity=2.0,
+                        fill_status="FILLED",
+                        created_at=thesis_created + timedelta(minutes=1)))
+    account = AccountState(
+        account_id="ACC", is_cash_account=True, has_margin=False, settled_cash=Decimal("10"),
+        positions=[Position(symbol="VOO", quantity=Decimal("2"),
+                            price=Decimal("560"), unit_cost=Decimal("999"))],
+    )
+    with get_session() as s:
+        _reconcile_fill_costs(s, account)
+    with get_session() as s:
+        cond = get_thesis(s, "VOO").entry_conditions
+        assert cond["fill_cost"] == 450.0       # entry-order fill, not blended cost
+        assert cond["entry_price"] == 500.0     # idea quote left intact
+
+
+def test_reconcile_fill_costs_noop_without_basis(tmp_path):
+    # Paper / no broker cost basis => nothing written (path stays byte-identical).
+    from decimal import Decimal
+
+    from investment_monitor.robo.models import AccountState, Position
+    from investment_monitor.robo.rebalance import _reconcile_fill_costs
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", account_id="ACC", conviction=0.5,
+                              status=ThesisStatus.ACTIVE.value,
+                              entry_conditions={"entry_price": 500.0}))
+    account = AccountState(
+        account_id="ACC", is_cash_account=True, has_margin=False, settled_cash=Decimal("10"),
+        positions=[Position(symbol="VOO", quantity=Decimal("2"), price=Decimal("560"))],
+    )
+    with get_session() as s:
+        _reconcile_fill_costs(s, account)
+    with get_session() as s:
+        assert "fill_cost" not in (get_thesis(s, "VOO").entry_conditions or {})

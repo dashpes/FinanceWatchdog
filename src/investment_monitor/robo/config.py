@@ -9,33 +9,104 @@ from YAML.
 from __future__ import annotations
 
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from investment_monitor.robo.models import CASH_SYMBOL
+
+
+class ConfigError(ValueError):
+    """A robo.yaml that fails validation, surfaced as a single clear message.
+
+    Raised by ``RoboConfig.from_yaml`` instead of letting a raw pydantic
+    ``ValidationError`` (or a YAML parse error) escape. A bad config file must
+    never crash a CLI command or a launchd daemon with an unhandled traceback —
+    the caller logs this message and exits cleanly instead of silently halting
+    the autonomous trader. Subclasses ``ValueError`` so existing ``except
+    ValueError`` handlers (e.g. the ``config set`` path) keep working.
+    """
+
+
+class Mode(str, Enum):
+    """Operating mode (categorical — a real enum so a CLI/GUI gets a dropdown).
+
+    ``str``-valued so existing ``config.mode == "autonomous"`` comparisons and YAML
+    round-trips keep working unchanged.
+    """
+
+    rebalance = "rebalance"   # fixed target_allocation
+    autonomous = "autonomous"  # conviction-driven weights from the thesis store
 
 # Sum of target weights must be within this tolerance of 1.0.
 _ALLOCATION_TOLERANCE = Decimal("0.001")
 
 
 class RoboCaps(BaseModel):
-    """Rate and size caps enforced by the guardrail gate."""
+    """Rate and size caps enforced by the guardrail gate.
 
-    max_order_pct: float = Field(default=0.25, gt=0, le=1.0)
-    max_orders_per_run: int = Field(default=5, ge=0)
-    max_orders_per_day: int = Field(default=10, ge=0)
+    Fields carrying ``json_schema_extra={"x_ui": ...}`` are user-tunable and are
+    surfaced by ``robo.tunables`` to the ``config`` CLI (and, later, a GUI). The hard
+    validation bounds live in the pydantic constraints; ``x_ui`` only adds rendering
+    hints (group/control/slider range/step/unit).
+    """
+
+    max_order_pct: float = Field(
+        default=0.25, gt=0, le=1.0,
+        title="Max order size",
+        description="Largest single order as a fraction of portfolio value.",
+        json_schema_extra={"x_ui": {"group": "Trading", "control": "slider",
+                                    "min": 0.05, "max": 1.0, "step": 0.05, "unit": "fraction"}},
+    )
+    max_orders_per_run: int = Field(
+        default=5, ge=0, le=100,
+        title="Max orders per run",
+        description="Cap on orders placed in a single trade run.",
+        json_schema_extra={"x_ui": {"group": "Trading", "control": "stepper",
+                                    "min": 1, "max": 20, "step": 1}},
+    )
+    max_orders_per_day: int = Field(
+        default=10, ge=0, le=1000,
+        title="Max orders per day",
+        description="Cap on orders placed across all runs in a day.",
+        json_schema_extra={"x_ui": {"group": "Trading", "control": "stepper",
+                                    "min": 1, "max": 50, "step": 1}},
+    )
     # Fraction of an order's cost reserved for fees/slippage when checking affordability.
     fee_buffer: float = Field(default=0.01, ge=0, lt=1.0)
 
     # --- autonomous-mode safety guards (Phase 4). Permissive defaults = disabled,
     # so rebalance mode and existing behavior are unchanged unless these are set. ---
-    max_positions: int = Field(default=0, ge=0)              # 0 = unlimited distinct holdings
-    max_per_name_weight: float = Field(default=1.0, gt=0, le=1.0)  # 1.0 = no concentration cap
-    max_turnover_pct: float = Field(default=0.0, ge=0)       # 0 = unlimited gross turnover per run
-    max_drawdown_pct: float = Field(default=0.0, ge=0)       # 0 = drawdown circuit-breaker disabled
+    max_positions: int = Field(
+        default=0, ge=0, le=50,
+        title="Maximum positions",
+        description="Most distinct holdings the portfolio may carry (0 = unlimited).",
+        json_schema_extra={"x_ui": {"group": "Risk", "control": "stepper",
+                                    "min": 0, "max": 50, "step": 1}},
+    )
+    max_per_name_weight: float = Field(
+        default=1.0, gt=0, le=1.0,
+        title="Max weight per name",
+        description="Concentration cap: no single name above this fraction (1.0 = no cap).",
+        json_schema_extra={"x_ui": {"group": "Risk", "control": "slider",
+                                    "min": 0.05, "max": 1.0, "step": 0.05, "unit": "fraction"}},
+    )
+    max_turnover_pct: float = Field(
+        default=0.0, ge=0, le=10.0,
+        title="Max turnover per run",
+        description="Cap on gross buys per run as a fraction of portfolio value (0 = unlimited).",
+        json_schema_extra={"x_ui": {"group": "Trading", "control": "slider",
+                                    "min": 0.0, "max": 2.0, "step": 0.1, "unit": "fraction"}},
+    )
+    max_drawdown_pct: float = Field(
+        default=0.0, ge=0, le=100.0,
+        title="Drawdown breaker",
+        description="Halt new buys when down this % from the prior peak (0 = off; sells always allowed).",
+        json_schema_extra={"x_ui": {"group": "Risk", "control": "slider",
+                                    "min": 0, "max": 90, "step": 5, "unit": "percent"}},
+    )
 
 
 # Event-signal categories the proposer understands. Weights must key into this set.
@@ -111,9 +182,21 @@ class SizingConfig(BaseModel):
     """
 
     # Hard ceiling on any single name's target weight.
-    max_position_weight: float = Field(default=0.15, gt=0, le=1.0)
+    max_position_weight: float = Field(
+        default=0.15, gt=0, le=1.0,
+        title="Target weight ceiling",
+        description="Hard ceiling on any single name's conviction-sized target weight.",
+        json_schema_extra={"x_ui": {"group": "Sizing", "control": "slider",
+                                    "min": 0.05, "max": 1.0, "step": 0.05, "unit": "fraction"}},
+    )
     # Fractional-Kelly multiplier on the risk-adjusted (Sharpe) signal.
-    kelly_fraction: float = Field(default=0.25, gt=0, le=1.0)
+    kelly_fraction: float = Field(
+        default=0.25, gt=0, le=1.0,
+        title="Kelly fraction",
+        description="Fractional-Kelly multiplier on the risk-adjusted signal (lower = more conservative).",
+        json_schema_extra={"x_ui": {"group": "Sizing", "control": "slider",
+                                    "min": 0.1, "max": 1.0, "step": 0.05}},
+    )
     # How hard to shrink size as 90d CVaR (tail loss) grows.
     cvar_aversion: float = Field(default=2.0, ge=0)
     # Annualized risk-free rate used in the Sharpe numerator.
@@ -127,7 +210,13 @@ class SizingConfig(BaseModel):
     conviction_half_life_days: float = Field(default=30.0, gt=0)
     conviction_floor: float = Field(default=0.5, ge=0, le=1.0)
     # Always leave at least this fraction of the portfolio in cash (autonomous mode).
-    min_cash_weight: float = Field(default=0.05, ge=0, lt=1.0)
+    min_cash_weight: float = Field(
+        default=0.05, ge=0, lt=1.0,
+        title="Minimum cash",
+        description="Always keep at least this fraction of the portfolio in cash.",
+        json_schema_extra={"x_ui": {"group": "Sizing", "control": "slider",
+                                    "min": 0.0, "max": 0.9, "step": 0.05, "unit": "fraction"}},
+    )
 
 
 class AutonomyConfig(BaseModel):
@@ -209,16 +298,31 @@ class RoboConfig(BaseModel):
     # symbol -> target weight (0..1). May include the pseudo-symbol "CASH".
     target_allocation: dict[str, float] = Field(default_factory=dict)
     # Only trade if a holding drifts more than this fraction from its target.
-    rebalance_threshold: float = Field(default=0.05, ge=0, le=1.0)
+    rebalance_threshold: float = Field(
+        default=0.05, ge=0, le=1.0,
+        title="Rebalance threshold",
+        description="Only trade a name once it drifts more than this fraction from target.",
+        json_schema_extra={"x_ui": {"group": "Trading", "control": "slider",
+                                    "min": 0.0, "max": 0.5, "step": 0.01, "unit": "fraction"}},
+    )
     # Symbols the gate will allow trading. Defaults to target_allocation keys.
     allowlist: list[str] = Field(default_factory=list)
+    # Symbols the gate must never BUY (sells/exits always allowed). Operator-curated;
+    # the system also auto-learns broker-refused, un-buyable names into a separate
+    # persisted learned blocklist (see robo/blocklist.py). Union of both is enforced.
+    blocklist: list[str] = Field(default_factory=list)
 
     caps: RoboCaps = Field(default_factory=RoboCaps)
 
     # Operating mode. "rebalance" (default) = fixed target_allocation, exactly
     # today's behavior. "autonomous" = conviction-driven weights from the thesis
     # store. The mode never affects dry-run/gate safety.
-    mode: Literal["rebalance", "autonomous"] = "rebalance"
+    mode: Mode = Field(
+        default=Mode.rebalance,
+        title="Operating mode",
+        description="rebalance = fixed target_allocation; autonomous = conviction-driven from theses.",
+        json_schema_extra={"x_ui": {"group": "Strategy", "control": "select"}},
+    )
 
     # Event-driven signal settings (Phase 2). Disabled by default.
     signals: SignalConfig = Field(default_factory=SignalConfig)
@@ -234,10 +338,20 @@ class RoboConfig(BaseModel):
     learning: LearningConfig = Field(default_factory=LearningConfig)
 
     # Safety: simulate everything and place no real orders when True. Default True.
-    dry_run: bool = True
+    dry_run: bool = Field(
+        default=True,
+        title="Dry run (paper)",
+        description="Simulate everything and place NO real orders when on.",
+        json_schema_extra={"x_ui": {"group": "Safety", "control": "toggle"}},
+    )
     # Only PLACE live orders during US market hours (research/maintenance still run
     # 24/7; off-hours live runs propose + gate but defer placement). Default True.
-    require_market_hours: bool = True
+    require_market_hours: bool = Field(
+        default=True,
+        title="Trade only in market hours",
+        description="Defer live placement outside US market hours (research still runs 24/7).",
+        json_schema_extra={"x_ui": {"group": "Safety", "control": "toggle"}},
+    )
     # Whether to consult the local LLM for proposals (it is always re-checked by code).
     use_llm: bool = True
     # Optional override of which Ollama model to use; falls back to Settings.ollama_model.
@@ -250,9 +364,9 @@ class RoboConfig(BaseModel):
     def _upper_symbols(cls, v: dict[str, float]) -> dict[str, float]:
         return {sym.upper(): weight for sym, weight in v.items()}
 
-    @field_validator("allowlist")
+    @field_validator("allowlist", "blocklist")
     @classmethod
-    def _upper_allowlist(cls, v: list[str]) -> list[str]:
+    def _upper_symbol_lists(cls, v: list[str]) -> list[str]:
         return [s.upper() for s in v]
 
     @model_validator(mode="after")
@@ -283,9 +397,43 @@ class RoboConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> "RoboConfig":
-        """Load and validate robo config from a YAML file (defaults if missing)."""
+        """Load and validate robo config from a YAML file (defaults if missing).
+
+        Any validation or parse failure is re-raised as a single, actionable
+        :class:`ConfigError` (which key, the bound, the offending value) so a
+        bad file can never crash a daemon with a raw traceback.
+        """
         if not path.exists():
             return cls()
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        return cls(**data)
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"could not parse {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError(
+                f"{path} must contain a YAML mapping at the top level, "
+                f"got {type(data).__name__}"
+            )
+        try:
+            return cls(**data)
+        except ValidationError as exc:
+            raise ConfigError(_format_validation_error(path, exc)) from exc
+
+
+def _format_validation_error(path: Path, exc: ValidationError) -> str:
+    """Render a pydantic ValidationError as one clear, actionable message.
+
+    Names the dotted setting key, the offending value, and the violated bound
+    for each problem so the operator can fix robo.yaml without reading a
+    traceback.
+    """
+    lines = [f"invalid robo config in {path}:"]
+    for err in exc.errors():
+        key = ".".join(str(p) for p in err["loc"]) or "(root)"
+        msg = err["msg"]
+        if "input" in err:
+            lines.append(f"  - {key}: {msg} (got {err['input']!r})")
+        else:
+            lines.append(f"  - {key}: {msg}")
+    return "\n".join(lines)

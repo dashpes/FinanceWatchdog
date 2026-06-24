@@ -33,6 +33,7 @@ from investment_monitor.robo.models import (
     OrderType,
     Position,
     ProposedOrder,
+    Trade,
 )
 
 
@@ -199,7 +200,36 @@ def account_state_from_raw(
                 price = current_value / quantity
             else:
                 price = Decimal("0")
-        positions.append(Position(symbol=symbol, quantity=quantity, price=price))
+        # Cost basis: Public computes this per position (CostBasis: unitCost, totalCost,
+        # gainValue, gainPercentage). Pull it through so P&L is read from the broker
+        # rather than re-derived. All fields are optional — absent in paper snapshots.
+        cb = _as_dict(_first(pd, "cost_basis", "costBasis", default={}))
+        unit_cost = _to_decimal(_first(cb, "unit_cost", "unitCost"))
+        if unit_cost is None:
+            total_cost = _to_decimal(_first(cb, "total_cost", "totalCost"))
+            if total_cost is not None and quantity > 0:
+                unit_cost = total_cost / quantity
+        # A negative/odd cost basis is a bad payload, not a real price. Clamp it to
+        # None ("unknown") here so it can never raise or distort P&L — a quirky
+        # cost-basis field must never block the whole account snapshot / trading run.
+        if unit_cost is not None and unit_cost < 0:
+            logger.warning(
+                "Ignoring invalid unit_cost {uc} for {sym} (treating basis as unknown)",
+                uc=unit_cost, sym=symbol,
+            )
+            unit_cost = None
+        unrealized_gain = _to_decimal(_first(cb, "gain_value", "gainValue"))
+        unrealized_gain_pct = _to_decimal(_first(cb, "gain_percentage", "gainPercentage"))
+        positions.append(
+            Position(
+                symbol=symbol,
+                quantity=quantity,
+                price=price,
+                unit_cost=unit_cost,
+                unrealized_gain=unrealized_gain,
+                unrealized_gain_pct=unrealized_gain_pct,
+            )
+        )
 
     # In-flight orders: symbols with a still-working order at the broker. Used by the
     # gate to avoid stacking a new order on top of a queued one.
@@ -229,6 +259,84 @@ def account_state_from_raw(
         open_order_symbols=sorted(set(open_order_symbols)),
         raw={"account": account, "portfolio": portfolio},
     )
+
+
+def trades_from_raw(transactions: list[Any] | None) -> list[Trade]:
+    """Normalize raw history transactions into executed :class:`Trade` records.
+
+    Pure function (no SDK/network) so the realized-P&L accounting is unit-testable.
+    Keeps only equity TRADE rows with a usable side/quantity/principal; everything
+    else (deposits, dividends, fees, money movement) is skipped.
+    """
+    out: list[Trade] = []
+    for raw in transactions or []:
+        td = _as_dict(raw)
+        if str(_first(td, "type", default="")).upper() != "TRADE":
+            continue
+        side_raw = str(_first(td, "side", default="")).upper()
+        if side_raw not in ("BUY", "SELL"):
+            continue
+        symbol = str(_first(td, "symbol", default="")).upper()
+        qty = _to_decimal(_first(td, "quantity"))
+        principal = _to_decimal(_first(td, "principal_amount", "principalAmount"))
+        if not symbol or qty is None or qty <= 0 or principal is None:
+            continue
+        fees = _to_decimal(_first(td, "fees")) or Decimal("0")
+        out.append(
+            Trade(
+                symbol=symbol,
+                side=OrderSide.BUY if side_raw == "BUY" else OrderSide.SELL,
+                quantity=abs(qty),
+                gross=abs(principal),
+                fees=abs(fees),
+                timestamp=_parse_timestamp(_first(td, "timestamp")),
+            )
+        )
+    return out
+
+
+# Order statuses that mean the order is done — stop polling it.
+_TERMINAL_ORDER_STATUSES = frozenset(
+    {"FILLED", "REJECTED", "CANCELLED", "CANCELED", "EXPIRED", "REPLACED"}
+)
+
+
+def fill_from_order_raw(raw: Any) -> dict[str, Any]:
+    """Extract fill info from a ``get_order`` payload (pure, unit-testable).
+
+    Returns ``{status, average_price, filled_quantity, terminal}``. ``average_price``
+    / ``filled_quantity`` are None until the order trades; ``terminal`` is True ONLY
+    once the order STATUS is a final state (filled / cancelled / rejected / expired /
+    replaced).
+
+    Terminality is keyed on the status alone, NOT on the mere presence of an
+    ``average_price``: a PARTIALLY_FILLED order reports an ``average_price`` for the
+    shares filled so far but is still working, so it must keep being polled until the
+    rest fills (or it is cancelled). Latching it terminal on first sight would strand
+    the unfilled remainder, never reconciling the shares that fill later.
+    """
+    d = _as_dict(raw)
+    status = str(_first(d, "status", "orderStatus", "order_status", default="")).upper()
+    avg_price = _to_decimal(_first(d, "average_price", "averagePrice"))
+    filled_qty = _to_decimal(_first(d, "filled_quantity", "filledQuantity"))
+    return {
+        "status": status,
+        "average_price": avg_price,
+        "filled_quantity": filled_qty,
+        "terminal": status in _TERMINAL_ORDER_STATUSES,
+    }
+
+
+def _parse_timestamp(value: Any) -> Any:
+    """Best-effort parse of a transaction timestamp (datetime passthrough or ISO str)."""
+    from datetime import datetime as _dt
+
+    if value is None or isinstance(value, _dt):
+        return value
+    try:
+        return _dt.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 class PublicBroker:
@@ -342,6 +450,37 @@ class PublicBroker:
             except BrokerError as exc:
                 logger.warning("Could not backfill prices for {syms}: {e}", syms=missing, e=exc)
         return account_state_from_raw(account, portfolio, prices=prices)
+
+    def get_transactions(self, lookback_days: int = 365, max_pages: int = 25) -> list[Trade]:
+        """Fetch executed trades from account history (paginated), newest window first.
+
+        Best-effort and read-only: returns whatever pages succeed. Used for realized
+        P&L; never on the order-placement path.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from public_api_sdk import HistoryRequest  # type: ignore
+
+        account_id = self._account_id or None
+        start = datetime.now(timezone.utc) - timedelta(days=max(1, lookback_days))
+        trades: list[Trade] = []
+        next_token: str | None = None
+        for _ in range(max(1, max_pages)):
+            req = (
+                HistoryRequest(start=start, next_token=next_token)
+                if next_token
+                else HistoryRequest(start=start)
+            )
+            try:
+                raw = self.client.get_history(req, account_id) if account_id else self.client.get_history(req)
+            except TypeError:
+                raw = self.client.get_history(req)
+            page = _as_dict(raw)
+            trades.extend(trades_from_raw(_first(page, "transactions", default=[]) or []))
+            next_token = _first(page, "next_token", "nextToken")
+            if not next_token:
+                break
+        return trades
 
     def get_quotes(self, symbols: list[str]) -> dict[str, Decimal]:
         """Return last price per symbol. Takes/uses the SDK's instrument objects."""

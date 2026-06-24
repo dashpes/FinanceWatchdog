@@ -1,6 +1,7 @@
 """Insider Transaction Collector for SEC Form 4 filings."""
 
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 
 import httpx
 from bs4 import BeautifulSoup
@@ -8,6 +9,31 @@ from loguru import logger
 
 from .base import BaseCollector, CollectorResult
 from ..storage import InsiderTransaction, insider_transaction_exists, save_insider_transaction
+
+# Issuer symbols that are NOT real tickers. Some Form 4 filings and congressional
+# disclosures carry these placeholders literally. This is the SINGLE source of
+# truth (see is_junk_ticker) shared by the insider, congress, and news collectors
+# and the confluence engine, so the set can't silently diverge across them. It is
+# the UNION of every entry those call sites historically filtered.
+JUNK_TICKERS = frozenset({"", "NONE", "N/A", "NA", "--", "N\\A"})
+
+# Additional non-issuer tokens that show up as bogus RSS cashtags ($USD, $CEO,
+# $WSJ, ...) but are not literal placeholders in filings. Applied ONLY on the
+# broad-news cashtag path so the (real) insider/congress symbol filter is
+# unchanged.
+JUNK_CASHTAGS = frozenset({"USD", "CEO", "WSJ"})
+
+
+def is_junk_ticker(ticker: str | None) -> bool:
+    """True if ``ticker`` is a placeholder/non-issuer token, not a real symbol.
+
+    Case- and whitespace-insensitive: ``None``, the empty string, and known junk
+    placeholders ('NONE', 'N/A', 'NA', '--', etc.) all return True so they never
+    reach the DB or the confluence engine.
+    """
+    if ticker is None:
+        return True
+    return ticker.strip().upper() in JUNK_TICKERS
 
 
 class InsiderCollector(BaseCollector):
@@ -26,8 +52,10 @@ class InsiderCollector(BaseCollector):
     SEC_CIK_LOOKUP_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
     SEC_BASE_URL = "https://www.sec.gov"
 
-    # User-Agent required by SEC - they block requests without a proper UA
-    USER_AGENT = "InvestmentMonitor/1.0 (Investment Tracking Application)"
+    # User-Agent required by SEC - they block requests without a proper UA.
+    # SEC asks for a real contact; broad ingestion makes many requests, so include one.
+    USER_AGENT = "FinanceWatchdog/1.0 (daniel.ashpes@gmail.com)"
+    EDGAR_ARCHIVES = "https://www.sec.gov/Archives"
 
     async def collect(self, tickers: list[str]) -> CollectorResult:
         """
@@ -115,6 +143,166 @@ class InsiderCollector(BaseCollector):
         # Commit after processing all filings for this ticker
         self.session.commit()
         return records_saved
+
+    # ----------------------------------------------------------------------- #
+    # Broad, universe-independent collection (SEC EDGAR daily index)
+    # ----------------------------------------------------------------------- #
+    async def collect_all(
+        self, *, days_back: int = 1, limit: int | None = None
+    ) -> CollectorResult:
+        """Retain ALL Form 4 insider transactions market-wide (broad collection).
+
+        Iterates the EDGAR *daily index* for the last ``days_back`` business days,
+        filters to Form 4, and parses each filing's ownership XML into
+        InsiderTransaction rows — across the WHOLE market, not a configured universe
+        (the issuer ticker is taken from the filing itself). Deduped by ``sec_url``.
+
+        Args:
+            days_back: how many recent business days of indexes to ingest.
+            limit: cap on filings to parse this run (safety/testing bound).
+        """
+        started_at = datetime.now()
+        records = 0
+        errors: list[str] = []
+        seen: set[str] = set()
+
+        async with httpx.AsyncClient(
+            headers={"User-Agent": self.USER_AGENT}, timeout=30.0
+        ) as client:
+            filing_urls: list[str] = []
+            for d in self._recent_business_dates(days_back):
+                try:
+                    idx = await self._get(client, self._daily_index_url(d))
+                    filing_urls.extend(self._parse_index_for_form4(idx))
+                except Exception as e:  # noqa: BLE001 - a missing/holiday index is fine
+                    logger.debug(f"{self.name}: daily index {d} unavailable: {e}")
+
+            if limit is not None:
+                filing_urls = filing_urls[:limit]
+            logger.info(f"{self.name}: {len(filing_urls)} Form 4 filings to parse (broad)")
+
+            for form_url in filing_urls:
+                try:
+                    txt = await self._get(client, form_url)
+                    xml = self._extract_ownership_xml(txt)
+                    if not xml:
+                        continue
+                    for txn in self._parse_form4(xml, None, form_url):
+                        if txn.sec_url in seen:
+                            continue
+                        seen.add(txn.sec_url)
+                        if not insider_transaction_exists(self.session, txn.sec_url):
+                            self.session.add(txn)  # commit once below, not per row
+                            records += 1
+                except Exception as e:  # noqa: BLE001 - one bad filing must not abort the run
+                    logger.debug(f"{self.name}: failed filing {form_url}: {e}")
+
+        try:
+            self.session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.session.rollback()
+            error_msg = f"Failed to commit broad insider transactions: {str(e)}"
+            errors.append(error_msg)
+            logger.error(f"{self.name}: {error_msg}")
+
+        return CollectorResult(
+            collector_name=self.name,
+            success=len(errors) == 0,
+            records_collected=records,
+            errors=errors,
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
+
+    async def _get(self, client: httpx.AsyncClient, url: str) -> str:
+        """Rate-limited GET (respects SEC's 10 req/s)."""
+        await self._rate_limit()
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
+
+    # Extra TRADING days to look back beyond the requested span. A weekday market
+    # holiday (e.g. a Monday holiday) leaves the immediately-preceding trading day's
+    # late-filed Form 4s unposted at our last run, so a fixed +1 weekday bridge can
+    # silently skip them: a Tuesday-after-a-Monday-holiday run that only reaches
+    # Monday misses the prior Friday's late filings. Bridging several real trading
+    # days spans any single holiday gap (the longest US-market closures are a single
+    # weekday, so a 3+ Thu-Fri / weekend / Mon-holiday run is the worst case). Dedup
+    # by ``sec_url`` makes the extra overlap a harmless no-op.
+    _BRIDGE_TRADING_DAYS = 4
+
+    def _is_trading_day(self, d: date) -> bool:
+        """True if ``d`` is a US-market trading day (weekday and not a known holiday).
+
+        Reuses ``market_hours``' public NYSE trading-day calendar when importable so
+        the holiday knowledge has a single source of truth; if that import is
+        unavailable for any reason we fail OPEN (weekday-only) — over-covering a
+        holiday index is harmless (a missing index is skipped), but skipping a real
+        trading day would silently drop filings.
+        """
+        if d.weekday() >= 5:  # Sat / Sun
+            return False
+        try:
+            from ..robo.market_hours import is_trading_day
+        except Exception:  # noqa: BLE001 - fail open: weekend filter still applies
+            return True
+        return is_trading_day(d)
+
+    def _recent_business_dates(self, days_back: int) -> list[date]:
+        """The most recent TRADING days with filings (newest first).
+
+        Counts *trading* days (Mon-Fri excluding NYSE holidays), not calendar days,
+        anchored at the most recent trading day on/before today, so a weekend OR
+        holiday run still bridges back to the last open day instead of returning an
+        empty list (EDGAR/markets don't file on weekends or holidays). We also always
+        include several extra prior trading days beyond the requested span
+        (``_BRIDGE_TRADING_DAYS``): that bridge guarantees the previous trading day's
+        late-filed Form 4s are picked up — including across a weekday holiday gap,
+        where a fixed +1 weekday bridge would silently skip the day before the
+        holiday (e.g. a Tuesday run after a Monday holiday still reaches the prior
+        Friday). Dedup by ``sec_url`` makes re-covering a day idempotent.
+        """
+        want = max(1, days_back) + self._BRIDGE_TRADING_DAYS
+        out: list[date] = []
+        day = date.today()
+        # Anchor at the most recent trading day on/before today (skip weekends AND
+        # holidays), then walk back collecting only trading days.
+        while not self._is_trading_day(day):
+            day -= timedelta(days=1)
+        while len(out) < want:
+            if self._is_trading_day(day):
+                out.append(day)
+            day -= timedelta(days=1)
+        return out
+
+    def _daily_index_url(self, d: date) -> str:
+        qtr = (d.month - 1) // 3 + 1
+        return f"{self.EDGAR_ARCHIVES}/edgar/daily-index/{d.year}/QTR{qtr}/form.{d:%Y%m%d}.idx"
+
+    def _parse_index_for_form4(self, idx_text: str) -> list[str]:
+        """Pull Form 4 submission URLs out of an EDGAR daily ``form.*.idx``.
+
+        Lines are: ``Form Type  Company Name  CIK  Date Filed  File Name``. The last
+        whitespace token is the submission path; the first is the form type.
+        """
+        urls: list[str] = []
+        for line in idx_text.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "4":  # exact Form 4 (not 4/A amendments)
+                continue
+            file_name = parts[-1]
+            if file_name.startswith("edgar/data/") and file_name.endswith(".txt"):
+                urls.append(f"{self.EDGAR_ARCHIVES}/{file_name}")
+        return urls
+
+    def _extract_ownership_xml(self, submission_text: str) -> str | None:
+        """Extract the ``<ownershipDocument>`` Form 4 XML from a full submission .txt."""
+        m = re.search(
+            r"<ownershipDocument>.*?</ownershipDocument>",
+            submission_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        return m.group(0) if m else None
 
     async def _get_cik_for_ticker(self, ticker: str) -> str | None:
         """
@@ -292,7 +480,7 @@ class InsiderCollector(BaseCollector):
         return None
 
     def _parse_form4(
-        self, xml_content: str, ticker: str, sec_url: str
+        self, xml_content: str, ticker: str | None, sec_url: str
     ) -> list[InsiderTransaction]:
         """
         Parse Form 4 XML into transaction records.
@@ -307,6 +495,15 @@ class InsiderCollector(BaseCollector):
         """
         transactions: list[InsiderTransaction] = []
         soup = BeautifulSoup(xml_content, "xml")
+
+        # Broad mode passes ticker=None; derive the issuer symbol from the filing itself.
+        if not ticker:
+            sym = soup.find("issuerTradingSymbol")
+            ticker = sym.text.strip().upper() if sym and sym.text else None
+            # Some filings carry junk placeholders ('NONE'/'N/A'/'NA'/'--'/'') instead
+            # of a real symbol — treat those as no ticker so they never reach the DB.
+            if is_junk_ticker(ticker):
+                return []  # can't attribute a transaction without an issuer ticker
 
         # Extract owner information
         owner_name = self._extract_owner_name(soup)
@@ -435,21 +632,23 @@ class InsiderCollector(BaseCollector):
                     except ValueError:
                         pass
 
-            # Get transaction type (A=Acquisition/P=Purchase, D=Disposition/S=Sale)
+            # Get transaction type. raw_code is the actual SEC code (P/S/A/M/F/...);
+            # transaction_type is the collapsed buy/sell kept for the legacy signal path.
             transaction_type = "P"  # Default to purchase
+            raw_code: str | None = None
             coding = txn_elem.find("transactionCoding")
             if coding:
                 code = coding.find("transactionCode")
                 if code and code.text:
-                    code_text = code.text.strip().upper()
+                    raw_code = code.text.strip().upper()
                     # P = Purchase, S = Sale, A = Award/Grant, D = Sale (disposition)
                     # M = Exercise of derivative
-                    if code_text in ("S", "D"):
+                    if raw_code in ("S", "D"):
                         transaction_type = "S"
-                    elif code_text in ("P", "A", "M"):
+                    elif raw_code in ("P", "A", "M"):
                         transaction_type = "P"
                     else:
-                        transaction_type = code_text
+                        transaction_type = raw_code
 
             # Get shares
             shares = 0
@@ -481,9 +680,9 @@ class InsiderCollector(BaseCollector):
             if shares and price_per_share:
                 total_value = shares * price_per_share
 
-            # Create unique sec_url for this specific transaction
-            # Use base URL + transaction details for uniqueness
-            sec_url = f"{base_sec_url}#{owner_name}_{trade_date}_{transaction_type}_{shares}"
+            # Create unique sec_url for this specific transaction. Use the RAW code so
+            # a same-day purchase (P) and grant (A) of equal size don't collide.
+            sec_url = f"{base_sec_url}#{owner_name}_{trade_date}_{raw_code or transaction_type}_{shares}"
 
             if shares == 0:
                 return None
@@ -495,6 +694,7 @@ class InsiderCollector(BaseCollector):
                 owner_name=owner_name,
                 owner_title=owner_title,
                 transaction_type=transaction_type,
+                raw_code=raw_code,
                 shares=shares,
                 price_per_share=price_per_share,
                 total_value=total_value,

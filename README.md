@@ -11,7 +11,7 @@ A personal investment monitoring system that tracks your portfolio, collects mar
 - **Earnings Calendar**: Get notified before earnings announcements
 - **ETF Holdings**: Track changes in ETF compositions
 - **AI Analysis**: Local LLM for news relevance scoring, Claude API for weekly synthesis
-- **Flexible Notifications**: Console logging (Slack/email ready to add)
+- **Flexible Notifications**: Console, Discord (digests), and iMessage (robo trade/error/daily alerts on macOS)
 - **Robo Advisor**: Cash-only, long-only autonomous rebalancing of a Public.com account, with a deterministic guardrail gate the LLM cannot bypass (see [Robo Advisor](#robo-advisor))
 
 ## Quick Start
@@ -384,10 +384,35 @@ investment-robo status --run-id <RUN_ID>
 
 # Go live (ALL must be true): config dry_run:false, ROBO_FORCE_DRY_RUN=false, and --live.
 investment-robo run --live --yes
+
+# Text yourself a portfolio + P&L summary (read-only; runs daily on the schedule).
+investment-robo daily-summary
 ```
 
 There is **no Public.com paper-trading sandbox** — when live, orders are real money. Keep
 `dry_run: true` and watch a week of simulated runs before flipping anything.
+
+### iMessage notifications (macOS)
+
+The robo texts you through Messages.app on three events: **trades executed**, **run
+errors** (a refused/failed/errored run — a silently dead trader is the worst outcome),
+and a **daily summary** of value and P&L. It's opt-in and fail-open — notification
+problems can never affect trading, and with `IMESSAGE_TO` unset the path is a no-op.
+
+```bash
+# 1. In .env, set the recipient (your phone number or Apple ID email):
+#      IMESSAGE_TO=+15551234567
+#      IMESSAGE_NOTIFY_PAPER=false   # set true to also be texted on paper placements
+# 2. Verify the setup (this triggers the one-time macOS Automation permission prompt):
+investment-robo notify-test
+```
+
+Requirements: Messages.app signed in to iMessage, and Automation permission for the
+runner to control Messages (System Settings > Privacy & Security > Automation — granted
+the first time, e.g. via `notify-test`). Live trades and run errors notify regardless of
+mode; paper/dry-run placements stay quiet unless `IMESSAGE_NOTIFY_PAPER=true`. On macOS,
+`scripts/robo-schedule.sh install` adds a `robo-summary` job that runs `daily-summary` at
+13:15 PT Mon–Fri (just after the close).
 
 ### Scheduling
 

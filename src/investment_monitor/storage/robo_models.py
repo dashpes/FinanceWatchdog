@@ -25,6 +25,9 @@ class RoboRun(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=True)  # llm | deterministic
     total_value: Mapped[float] = mapped_column(Float, nullable=True)
     settled_cash: Mapped[float] = mapped_column(Float, nullable=True)
+    # Broker-reported unrealized P&L at run start — snapshotted so runs form an
+    # equity/P&L time series. Null when the broker reports no cost basis (paper).
+    unrealized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
     num_proposed: Mapped[int] = mapped_column(Integer, default=0)
     num_accepted: Mapped[int] = mapped_column(Integer, default=0)
     num_rejected: Mapped[int] = mapped_column(Integer, default=0)
@@ -61,6 +64,12 @@ class RoboOrder(Base):
     simulated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=True)
+
+    # Execution truth, reconciled from the broker after placement (live only). Until
+    # reconciled to a terminal state, fill_status is NULL (the "still polling" marker).
+    fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fill_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False

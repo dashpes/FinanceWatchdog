@@ -12,6 +12,7 @@ drift in affordability math.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -37,18 +38,65 @@ class OrderType(str, Enum):
 
 
 class Position(BaseModel):
-    """A single long position in the account."""
+    """A single long position in the account.
+
+    The ``unit_cost`` / ``unrealized_*`` fields are the broker's own cost-basis math
+    (Public computes them and returns them on each position). They are all optional:
+    the broker may omit a basis, and dry-run/paper snapshots have none. Treat ``None``
+    as "unknown", never as zero.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     symbol: str
     quantity: Decimal = Field(..., ge=0)
     price: Decimal = Field(..., ge=0, description="Latest/last price per share")
+    # No `ge=0` constraint here on purpose: a quirky broker cost-basis payload (a
+    # negative/odd unitCost or totalCost) must NEVER raise inside the account snapshot
+    # and abort the whole rebalance run (that would refuse to trade for the run). The
+    # broker mapping sanitizes out-of-range values to None ("unknown") before building
+    # the Position; ``_sanitized_unit_cost`` enforces the same invariant for any other
+    # constructor so a stray negative basis can't reach the cost/return math.
+    unit_cost: Decimal | None = Field(
+        default=None, description="Average cost per share (broker cost basis); None if unknown"
+    )
+
+    @model_validator(mode="after")
+    def _sanitized_unit_cost(self) -> "Position":
+        # Treat a negative unit_cost as unknown rather than a real basis. A real cost
+        # basis is >= 0; anything below that is a bad payload, not a meaningful price.
+        if self.unit_cost is not None and self.unit_cost < 0:
+            object.__setattr__(self, "unit_cost", None)
+        return self
+    unrealized_gain: Decimal | None = Field(
+        default=None, description="Unrealized P&L in dollars, broker-reported"
+    )
+    unrealized_gain_pct: Decimal | None = Field(
+        default=None, description="Unrealized P&L as a percentage, broker-reported"
+    )
 
     @property
     def market_value(self) -> Decimal:
         """Current market value of the position."""
         return self.quantity * self.price
+
+    @property
+    def cost_basis_value(self) -> Decimal | None:
+        """Total cost basis (unit_cost * quantity); None when no basis is known."""
+        if self.unit_cost is None:
+            return None
+        return self.unit_cost * self.quantity
+
+    @property
+    def unrealized_return(self) -> Decimal | None:
+        """Unrealized return as a fraction (price / unit_cost - 1).
+
+        Derived from the broker's unit cost and the last price so the scale is
+        unambiguous (unlike the broker's percentage field). None when no basis.
+        """
+        if self.unit_cost is None or self.unit_cost <= 0:
+            return None
+        return self.price / self.unit_cost - 1
 
 
 class AccountState(BaseModel):
@@ -82,6 +130,28 @@ class AccountState(BaseModel):
         """Total portfolio value = settled cash + positions market value."""
         return self.settled_cash + self.positions_value
 
+    @property
+    def total_cost_basis(self) -> Decimal | None:
+        """Sum of position cost bases; None if no position reports a basis."""
+        bases = [p.cost_basis_value for p in self.positions if p.cost_basis_value is not None]
+        return sum(bases, Decimal("0")) if bases else None
+
+    @property
+    def total_unrealized_gain(self) -> Decimal | None:
+        """Total unrealized P&L across positions that report a cost basis.
+
+        Prefers the broker's own ``unrealized_gain`` per position; falls back to
+        (market value - cost basis) for any position that has a basis but no
+        broker-reported gain. None when no position has a basis at all.
+        """
+        contributions: list[Decimal] = []
+        for p in self.positions:
+            if p.unrealized_gain is not None:
+                contributions.append(p.unrealized_gain)
+            elif p.cost_basis_value is not None:
+                contributions.append(p.market_value - p.cost_basis_value)
+        return sum(contributions, Decimal("0")) if contributions else None
+
     def get_position(self, symbol: str) -> Position | None:
         """Return the position for ``symbol`` if held, else None."""
         for p in self.positions:
@@ -93,6 +163,28 @@ class AccountState(BaseModel):
         """Quantity currently held for ``symbol`` (0 if not held)."""
         pos = self.get_position(symbol)
         return pos.quantity if pos else Decimal("0")
+
+
+class Trade(BaseModel):
+    """A single executed trade from the broker's transaction history.
+
+    ``gross`` is the trade value before fees (price * qty); cost basis / proceeds
+    accounting layers fees on top in :mod:`investment_monitor.robo.pnl`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    side: OrderSide
+    quantity: Decimal = Field(..., gt=0)
+    gross: Decimal = Field(..., ge=0, description="Trade value (price * qty), fees excluded")
+    fees: Decimal = Field(default=Decimal("0"), ge=0)
+    timestamp: datetime | None = None
+
+    @property
+    def price(self) -> Decimal:
+        """Per-share execution price (gross / quantity)."""
+        return self.gross / self.quantity if self.quantity else Decimal("0")
 
 
 class ProposedOrder(BaseModel):

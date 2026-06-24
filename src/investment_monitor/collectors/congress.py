@@ -7,6 +7,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from .base import BaseCollector, CollectorResult
+from .insider import is_junk_ticker
 from ..storage import CongressionalTrade, save_congressional_trade
 
 
@@ -172,9 +173,10 @@ class CongressTradesCollector(BaseCollector):
             if not politician:
                 return None
 
-            # Get ticker - required field
+            # Get ticker - required field. Drop placeholders/non-issuer tokens via
+            # the shared junk-ticker filter so the set can't diverge across sources.
             ticker = raw.get("ticker", "").strip().upper()
-            if not ticker or ticker == "--" or ticker == "N/A":
+            if is_junk_ticker(ticker):
                 return None
 
             # Get trade type and normalize
@@ -252,6 +254,89 @@ class CongressTradesCollector(BaseCollector):
             CongressionalTrade.amount_range == trade.amount_range,
         )
         return self.session.scalar(stmt) is not None
+
+    def _trade_key(self, trade: CongressionalTrade) -> tuple:
+        """Dedup key matching the table's unique constraint."""
+        return (
+            trade.ticker, trade.politician, trade.trade_date,
+            trade.trade_type, trade.amount_range,
+        )
+
+    def _existing_trade_keys(self) -> set[tuple]:
+        """One-shot snapshot of existing trade keys for O(1) in-memory dedup.
+
+        Broad ingestion processes the full House+Senate history; a per-row
+        ``_trade_exists`` SELECT would be tens of thousands of queries, so we load
+        all existing keys once and check membership in memory instead.
+        """
+        rows = self.session.execute(
+            select(
+                CongressionalTrade.ticker, CongressionalTrade.politician,
+                CongressionalTrade.trade_date, CongressionalTrade.trade_type,
+                CongressionalTrade.amount_range,
+            )
+        ).all()
+        return {tuple(r) for r in rows}
+
+    async def collect_all(self, *, since: date | None = None) -> CollectorResult:
+        """Retain ALL congressional trades market-wide (broad multi-source collection).
+
+        Unlike ``collect(tickers)``, this does NOT filter to a configured universe —
+        it is the broad ingestion the insight engine needs (what is Congress quietly
+        buying across the WHOLE market, not just names we already hold?). Dedup uses a
+        single in-memory snapshot of existing keys, and rows are added without per-row
+        flush then committed once, so ingesting the full history stays fast.
+
+        Args:
+            since: if set, only retain trades on/after this date (bounds run volume).
+        """
+        started_at = datetime.now()
+        records = 0
+        errors: list[str] = []
+        seen = self._existing_trade_keys()
+
+        for chamber, fetch in (
+            ("House", self.fetch_house_trades),
+            ("Senate", self.fetch_senate_trades),
+        ):
+            try:
+                raw_trades = await fetch()
+                added = 0
+                for raw in raw_trades:
+                    trade = self.parse_trade(raw, chamber)
+                    if trade is None:
+                        continue
+                    if since is not None and trade.trade_date < since:
+                        continue
+                    key = self._trade_key(trade)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self.session.add(trade)  # no per-row flush; commit once below
+                    added += 1
+                records += added
+                logger.info(f"{self.name}: retained {added} {chamber} trades (broad, market-wide)")
+            except Exception as e:  # noqa: BLE001 - one chamber failing must not abort the other
+                error_msg = f"{chamber} broad fetch failed: {str(e)}"
+                errors.append(error_msg)
+                logger.error(f"{self.name}: {error_msg}")
+
+        try:
+            self.session.commit()
+        except Exception as e:  # noqa: BLE001
+            self.session.rollback()
+            error_msg = f"Failed to commit broad trades: {str(e)}"
+            errors.append(error_msg)
+            logger.error(f"{self.name}: {error_msg}")
+
+        return CollectorResult(
+            collector_name=self.name,
+            success=len(errors) == 0,
+            records_collected=records,
+            errors=errors,
+            started_at=started_at,
+            finished_at=datetime.now(),
+        )
 
     async def collect(self, tickers: list[str]) -> CollectorResult:
         """
