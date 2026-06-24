@@ -12,12 +12,14 @@ is explicitly enabled AND the env kill-switch is off). `status` shows recent run
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import typer
 
 from investment_monitor.config import get_settings
+from investment_monitor.robo import tunables
 from investment_monitor.robo.broker import BrokerError, PublicBroker
 from investment_monitor.robo.config import RoboConfig
 from investment_monitor.robo.notify import (
@@ -49,6 +51,110 @@ def _load_config(config_dir: Path | None) -> RoboConfig:
     settings = get_settings()
     cfg_dir = config_dir or settings.config_dir
     return RoboConfig.from_yaml(Path(cfg_dir) / "robo.yaml")
+
+
+def _config_path(config_dir: Path | None) -> Path:
+    cfg_dir = config_dir or get_settings().config_dir
+    return Path(cfg_dir) / "robo.yaml"
+
+
+# --- `config`: view + tune settings (the same schema a GUI would render) ----------
+
+config_app = typer.Typer(
+    name="config",
+    help="View and tune robo settings. The catalog is shared with any future GUI.",
+    no_args_is_help=True,
+)
+app.add_typer(config_app)
+
+# Settings whose change affects real-money behavior — flagged on `set`.
+_SAFETY_KEYS = {"dry_run", "mode"}
+
+
+def _fmt_range(t: tunables.Tunable) -> str:
+    if t.choices:
+        return "{" + " | ".join(t.choices) + "}"
+    if t.minimum is not None or t.maximum is not None:
+        lo = "" if t.minimum is None else f"{t.minimum:g}"
+        hi = "" if t.maximum is None else f"{t.maximum:g}"
+        return f"[{lo}…{hi}]"
+    return ""
+
+
+@config_app.command("list")
+def config_list(
+    group: str = typer.Option(None, "--group", "-g", help="Filter to one group."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the catalog + current values as JSON."),
+    config_dir: Path = typer.Option(None, "--config", help="Config directory."),
+) -> None:
+    """List every tunable setting with its current value, default, and bounds."""
+    cfg = _load_config(config_dir)
+    items = [t for t in tunables.catalog() if group is None or t.group.lower() == group.lower()]
+    if as_json:
+        payload = [{**t.as_dict(), "current": tunables.get_value(cfg, t.key)} for t in items]
+        typer.echo(json.dumps(payload, indent=2, default=str))
+        return
+    if not items:
+        typer.echo("No settings match.")
+        return
+    current_group = None
+    for t in items:
+        if t.group != current_group:
+            current_group = t.group
+            typer.secho(f"\n{current_group}", fg=typer.colors.CYAN, bold=True)
+        value = tunables.get_value(cfg, t.key)
+        rng = _fmt_range(t)
+        line = f"  {t.key:<24} = {str(value):<12} default {str(t.default):<8} {rng}"
+        typer.echo(line.rstrip())
+        if t.description:
+            typer.secho(f"      {t.description}", fg=typer.colors.BRIGHT_BLACK)
+
+
+@config_app.command("get")
+def config_get(
+    key: str = typer.Argument(..., help="Dotted setting key, e.g. caps.max_positions."),
+    config_dir: Path = typer.Option(None, "--config", help="Config directory."),
+) -> None:
+    """Show one setting's current value and metadata."""
+    t = {x.key: x for x in tunables.catalog()}.get(key)
+    if t is None:
+        typer.secho(f"Unknown setting '{key}'. Run `config list`.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    value = tunables.get_value(_load_config(config_dir), key)
+    typer.secho(f"{t.key} = {value}", fg=typer.colors.GREEN, bold=True)
+    typer.echo(f"  {t.title} — {t.description}")
+    typer.echo(f"  type: {t.type}   default: {t.default}   {_fmt_range(t)}".rstrip())
+    if t.unit:
+        typer.echo(f"  unit: {t.unit}")
+
+
+@config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Dotted setting key, e.g. caps.max_positions."),
+    value: str = typer.Argument(..., help="New value (validated against the schema)."),
+    config_dir: Path = typer.Option(None, "--config", help="Config directory."),
+) -> None:
+    """Validate and write a setting to robo.yaml (comments preserved)."""
+    path = _config_path(config_dir)
+    try:
+        old = tunables.get_value(_load_config(config_dir), key)
+    except AttributeError:
+        old = "(unset)"
+    try:
+        new = tunables.set_value(path, key, value)
+    except ValueError as exc:
+        typer.secho(f"Rejected: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.secho(f"Set {key}: {old} → {new}", fg=typer.colors.GREEN)
+    if key in _SAFETY_KEYS:
+        typer.secho(
+            "  ⚠ this affects live trading behavior — confirm it's intended.",
+            fg=typer.colors.YELLOW,
+        )
+    typer.secho(
+        "  A running daemon picks this up on its next scheduled run.",
+        fg=typer.colors.BRIGHT_BLACK,
+    )
 
 
 @app.command("accounts")
