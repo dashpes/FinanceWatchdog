@@ -128,6 +128,61 @@ def test_cost_basis_parsed_into_position():
     assert pos.unrealized_return == Decimal("500") / Decimal("450") - 1
 
 
+def test_negative_unit_cost_payload_does_not_block_snapshot():
+    # Finding #4: a quirky cost-basis payload (negative unitCost) must NOT raise a
+    # ValidationError inside account_state_from_raw — that would fail the whole account
+    # snapshot and refuse trading for the run. It is sanitized to None ("unknown"),
+    # while every other field is preserved so the snapshot (and trading) proceeds.
+    pos_raw = {
+        "instrument": {"symbol": "VOO", "type": "EQUITY"},
+        "quantity": "2",
+        "last_price": {"last_price": "500"},
+        "cost_basis": {"unit_cost": "-450", "total_cost": "-900"},  # bad/odd payload
+    }
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[pos_raw]),
+    )
+    pos = state.get_position("VOO")
+    assert pos is not None                      # snapshot built, run not refused
+    assert pos.unit_cost is None                # bad basis treated as unknown
+    assert pos.cost_basis_value is None
+    assert pos.unrealized_return is None
+    assert pos.price == Decimal("500")          # other fields intact
+    assert pos.quantity == Decimal("2")
+    assert state.is_cash_account is True
+
+
+def test_negative_derived_unit_cost_from_total_cost_is_unknown():
+    # Even when unit_cost is derived from a negative totalCost it must clamp to None
+    # rather than produce a negative basis that distorts P&L / return math.
+    pos_raw = {
+        "instrument": {"symbol": "MSFT", "type": "EQUITY"},
+        "quantity": "4",
+        "last_price": {"last_price": "100"},
+        "cost_basis": {"total_cost": "-320"},  # no unitCost; derived would be -80
+    }
+    state = account_state_from_raw(
+        {"account_id": "A", "brokerage_account_type": "CASH"},
+        _portfolio(positions=[pos_raw]),
+    )
+    assert state.get_position("MSFT").unit_cost is None
+
+
+def test_position_model_sanitizes_negative_unit_cost_without_raising():
+    # Belt-and-suspenders at the model layer: constructing a Position directly with a
+    # negative unit_cost sanitizes it to None instead of raising.
+    from investment_monitor.robo.models import Position
+
+    p = Position(symbol="VOO", quantity=Decimal("1"), price=Decimal("500"),
+                 unit_cost=Decimal("-3"))
+    assert p.unit_cost is None
+    # A valid (>= 0) basis is preserved unchanged.
+    p2 = Position(symbol="VOO", quantity=Decimal("1"), price=Decimal("500"),
+                  unit_cost=Decimal("450"))
+    assert p2.unit_cost == Decimal("450")
+
+
 def test_unit_cost_derived_from_total_cost_when_unit_absent():
     pos_raw = {
         "instrument": {"symbol": "MSFT", "type": "EQUITY"},

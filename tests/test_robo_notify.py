@@ -144,6 +144,26 @@ def test_notifications_configured_reflects_channel():
     assert not notify.notifications_configured(_settings(to="", smtp_host="", email_to=""))
 
 
+# --- _signed_money (sign decided after rounding) ---------------------------------
+
+def test_signed_money_tiny_negative_is_not_negative_zero():
+    # A magnitude that rounds to 0.00 must never render the misleading '-$0.00'.
+    assert notify._signed_money(Decimal("-0.004")) == "+$0.00"
+    assert notify._signed_money(Decimal("-0.0049")) == "+$0.00"
+
+
+def test_signed_money_exact_zero_is_positive():
+    assert notify._signed_money(Decimal("0")) == "+$0.00"
+
+
+def test_signed_money_keeps_real_signs():
+    # Real, non-zero magnitudes keep their sign and rounding behaviour.
+    assert notify._signed_money(Decimal("-12.50")) == "-$12.50"
+    assert notify._signed_money(Decimal("0.04")) == "+$0.04"
+    assert notify._signed_money(Decimal("-0.006")) == "-$0.01"  # rounds up to a cent
+    assert notify._signed_money(Decimal("1234.5")) == "+$1,234.50"
+
+
 # --- format_daily_summary (pure) -------------------------------------------------
 
 def _account():

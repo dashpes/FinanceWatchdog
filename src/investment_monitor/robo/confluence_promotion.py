@@ -95,7 +95,12 @@ def promote_confluence_findings(
             # stale one that drove the first buy) so we can't auto-rebuy a falling knife.
             le = existing.last_evaluated_at
             same_finding = (existing.evidence_refs or {}).get("confluence_finding_id") == f.id
-            stale = le is not None and f.as_of_date is not None and f.as_of_date <= le.date()
+            # Stale only if STRICTLY older than the last evaluation. A genuinely new
+            # finding produced on the SAME calendar day (a fresh, stronger cross-source
+            # signal) must still be able to re-promote; same-day must not read as stale.
+            # The falling-knife guard against re-buying the SAME finding stays in
+            # `same_finding`, so a same-day re-promote can only come from a new finding.
+            stale = le is not None and f.as_of_date is not None and f.as_of_date < le.date()
             if same_finding or stale:
                 continue
         # Already run up big since the buys? The insider signal is priced in — skip.

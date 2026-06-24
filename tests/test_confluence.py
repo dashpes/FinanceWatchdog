@@ -265,3 +265,70 @@ def test_news_alone_cannot_qualify_a_finding(tmp_path):
     with get_session() as s:
         findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
     assert [f for f in findings if f.ticker == "NWQ"] == []
+
+
+# --------------------------------------------------------------------------- #
+# #7 news recency: a freshly-INGESTED but stale-PUBLISHED backfill is not "fresh"
+# --------------------------------------------------------------------------- #
+def test_news_evidence_filters_by_published_not_ingestion(tmp_path):
+    # Articles published weeks before `today` but re-ingested now (created_at = now)
+    # must NOT count as fresh corroboration — score by published_at, not created_at.
+    from datetime import datetime
+
+    from investment_monitor.analysis.confluence import gather_news_evidence
+    from investment_monitor.storage import NewsItem
+
+    init_db(tmp_path / "n.db")
+    # window_days=30 -> with TODAY=2026-06-18 the cutoff is 2026-05-19.
+    stale = datetime(2026, 4, 1, 12, 0)   # ~11 weeks stale, but freshly re-ingested
+    fresh = datetime(2026, 6, 16, 12, 0)  # genuinely recent
+    with get_session() as s:
+        # STALE: 3 backfilled articles (created_at defaults to now) -> must be dropped.
+        for i in range(3):
+            s.add(NewsItem(ticker="STALE", headline=f"old{i}", source="x",
+                           url=f"http://stale/{i}", published_at=stale))
+        # FRESH: 2 recently-published articles -> must count.
+        for i in range(2):
+            s.add(NewsItem(ticker="FRESH", headline=f"new{i}", source="x",
+                           url=f"http://fresh/{i}", published_at=fresh))
+    with get_session() as s:
+        ev = gather_news_evidence(s, {"STALE", "FRESH"}, TODAY,
+                                  window_days=30, min_items=2)
+    tickers = {e.ticker for e in ev}
+    assert "STALE" not in tickers   # stale-published backfill rejected
+    assert "FRESH" in tickers       # recent publication accepted
+    assert all(e.date == fresh.date() for e in ev)
+
+
+# --------------------------------------------------------------------------- #
+# None-valued pseudo-actors corroborate WITHOUT deflating conviction/breadth.
+# (The volume/news gatherers emit Evidence with value=None, unlike the _ev helper.)
+# --------------------------------------------------------------------------- #
+def test_none_valued_pseudo_actor_does_not_deflate_conviction():
+    insiders = [_ev("X", "insider", "A", value=60000.0),
+                _ev("X", "insider", "B", value=60000.0)]
+    # A volume spike emits value=None, exactly like gather_volume_evidence.
+    vol = Evidence(ticker="X", source="volume", actor="volume_spike",
+                   date=TODAY - timedelta(days=1), value=None, detail="3x avg")
+    base = score_confluence(insiders, today=TODAY)
+    corr = score_confluence(insiders + [vol], today=TODAY)
+    # Cross-source corroboration must RAISE the score, never lower it.
+    assert corr["score"] > base["score"]
+    # The None-valued pseudo-actor must not inflate breadth or deflate per-actor $.
+    assert corr["n_actors"] == 2
+    assert corr["median_per_actor"] == 60000.0
+    assert corr["n_sources"] == 2
+
+
+def test_value_none_gatherers_promote_cross_source_finding(tmp_path):
+    # End-to-end: real gatherers (value=None for volume) must make a 2-insider name a
+    # cross-source finding, not silently lose conviction.
+    db = tmp_path / "vn.db"
+    _seed(db, [("VN", "Alice", "P", 2, 60000), ("VN", "Bob", "P", 3, 60000)])
+    _seed_prices(db, "VN", spike_vol=300000)
+    with get_session() as s:
+        findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
+        vn = [f for f in findings if f.ticker == "VN"]
+        assert vn and vn[0].n_sources == 2
+        # n_actors reflects the two DOLLAR-bearing insiders, not the pseudo-actor.
+        assert vn[0].n_actors == 2

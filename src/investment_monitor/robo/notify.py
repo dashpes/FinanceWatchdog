@@ -134,8 +134,14 @@ def _money(value) -> str:
 
 
 def _signed_money(value) -> str:
-    """Format a signed dollar amount: +$0.04 / -$12.50."""
-    return f"{'+' if value >= 0 else '-'}${abs(value):,.2f}"
+    """Format a signed dollar amount: +$0.04 / -$12.50.
+
+    The sign is decided AFTER rounding to cents: a tiny magnitude that rounds to
+    0.00 (e.g. Decimal('-0.004')) must render '+$0.00', never a misleading '-$0.00'.
+    """
+    magnitude = f"{abs(value):,.2f}"
+    sign = "-" if value < 0 and float(magnitude.replace(",", "")) != 0 else "+"
+    return f"{sign}${magnitude}"
 
 
 def _order_size(order_row) -> str:

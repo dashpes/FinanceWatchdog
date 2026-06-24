@@ -402,26 +402,38 @@ def test_fill_cost_preferred_over_entry_price_for_outcome(tmp_path):
 
 
 def test_reconcile_fill_costs_writes_broker_basis(tmp_path):
+    # fill_cost must be the thesis's OWN entry-order fill price (450, from the
+    # reconciled BUY), NOT the broker's blended unit cost (999 here) — the blend
+    # folds in pre-existing/independent shares and would bias calibration.
+    from datetime import datetime, timedelta
     from decimal import Decimal
 
-    from investment_monitor.robo.models import AccountState, Position
+    from investment_monitor.robo.models import AccountState, OrderSide, Position
     from investment_monitor.robo.rebalance import _reconcile_fill_costs
+    from investment_monitor.storage import RoboOrder
 
     init_db(tmp_path / "t.db")
     with get_session() as s:
         save_thesis(s, Thesis(symbol="VOO", account_id="ACC", conviction=0.5,
                               status=ThesisStatus.ACTIVE.value,
                               entry_conditions={"entry_price": 500.0}))
+        thesis_created = get_thesis(s, "VOO").created_at
+        # The robo's own opening BUY, reconciled to a real fill at $450 AFTER the idea.
+        s.add(RoboOrder(run_id="R1", symbol="VOO", side=OrderSide.BUY.value,
+                        order_type="MARKET", quantity=2.0, placed=True,
+                        broker_order_id="O1", fill_price=450.0, fill_quantity=2.0,
+                        fill_status="FILLED",
+                        created_at=thesis_created + timedelta(minutes=1)))
     account = AccountState(
         account_id="ACC", is_cash_account=True, has_margin=False, settled_cash=Decimal("10"),
         positions=[Position(symbol="VOO", quantity=Decimal("2"),
-                            price=Decimal("560"), unit_cost=Decimal("450"))],
+                            price=Decimal("560"), unit_cost=Decimal("999"))],
     )
     with get_session() as s:
         _reconcile_fill_costs(s, account)
     with get_session() as s:
         cond = get_thesis(s, "VOO").entry_conditions
-        assert cond["fill_cost"] == 450.0       # real basis written
+        assert cond["fill_cost"] == 450.0       # entry-order fill, not blended cost
         assert cond["entry_price"] == 500.0     # idea quote left intact
 
 

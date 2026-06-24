@@ -21,7 +21,7 @@ import typer
 from investment_monitor.config import get_settings
 from investment_monitor.robo import tunables
 from investment_monitor.robo.broker import BrokerError, PublicBroker
-from investment_monitor.robo.config import RoboConfig
+from investment_monitor.robo.config import ConfigError, RoboConfig
 from investment_monitor.robo.notify import (
     format_daily_summary,
     notifications_configured,
@@ -50,7 +50,14 @@ app = typer.Typer(
 def _load_config(config_dir: Path | None) -> RoboConfig:
     settings = get_settings()
     cfg_dir = config_dir or settings.config_dir
-    return RoboConfig.from_yaml(Path(cfg_dir) / "robo.yaml")
+    try:
+        return RoboConfig.from_yaml(Path(cfg_dir) / "robo.yaml")
+    except ConfigError as exc:
+        # A bad robo.yaml must never crash a CLI command or a launchd daemon
+        # with a raw traceback (which would silently halt the autonomous
+        # trader). Surface one clear, actionable message and exit non-zero.
+        typer.secho(f"Config error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _config_path(config_dir: Path | None) -> Path:
@@ -136,10 +143,16 @@ def config_set(
 ) -> None:
     """Validate and write a setting to robo.yaml (comments preserved)."""
     path = _config_path(config_dir)
+    # The OLD value is shown for context only. Loading the current config to read
+    # it must NOT block the write: this command is the operator's tool for REPAIRING
+    # a robo.yaml that is currently out of bounds (which makes _load_config exit) or
+    # otherwise unloadable. The authoritative safety check is tunables.set_value,
+    # which validates the FULL merged config before writing — so a bad sibling field
+    # still blocks an invalid write, but a valid single-key repair succeeds.
     try:
         old = tunables.get_value(_load_config(config_dir), key)
-    except AttributeError:
-        old = "(unset)"
+    except (AttributeError, typer.Exit):
+        old = "(unavailable)"
     try:
         new = tunables.set_value(path, key, value)
     except ValueError as exc:

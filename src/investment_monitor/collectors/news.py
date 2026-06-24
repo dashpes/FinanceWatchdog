@@ -1,8 +1,8 @@
 """News collector that aggregates RSS feeds for portfolio tickers."""
 
+import calendar
 import re
-from datetime import datetime
-from time import mktime
+from datetime import datetime, timezone
 from typing import Any
 
 import feedparser
@@ -10,6 +10,7 @@ from loguru import logger
 
 from ..storage import NewsItem, news_exists, save_news_item
 from .base import BaseCollector, CollectorResult
+from .insider import JUNK_CASHTAGS, is_junk_ticker
 
 
 class NewsCollector(BaseCollector):
@@ -234,10 +235,15 @@ class NewsCollector(BaseCollector):
 
         Returns de-duplicated, order-preserving uppercase symbols. Unlike
         ``_ticker_mentioned`` (which needs a candidate list), this discovers tickers
-        with no portfolio to match against — what "broad" requires.
+        with no portfolio to match against — what "broad" requires. Junk cashtags
+        ($NONE/$NA/$USD/$CEO/$WSJ ...) are dropped via the shared junk-ticker filter
+        so non-issuer noise never becomes a NewsItem.ticker row that the confluence
+        engine would treat as corroboration.
         """
         out: list[str] = []
         for sym in self.CASHTAG_RE.findall(text.upper()):
+            if is_junk_ticker(sym) or sym in JUNK_CASHTAGS:
+                continue
             if sym not in out:
                 out.append(sym)
         return out
@@ -388,24 +394,38 @@ class NewsCollector(BaseCollector):
         """
         Parse the publication date from a feed entry.
 
+        feedparser exposes ``*_parsed`` as a UTC ``struct_time``. We convert via
+        ``calendar.timegm`` (which treats the struct as UTC) and return a naive
+        UTC datetime — NOT ``time.mktime``/``fromtimestamp``, which would treat the
+        struct as LOCAL time and shift every timestamp by the host's UTC offset.
+        Storing naive UTC keeps ``published_at`` consistent with the retention prune
+        cutoff and the confluence recency window (both UTC-based).
+
         Args:
             entry: Feed entry dictionary
 
         Returns:
-            datetime object or None if parsing fails
+            datetime object (naive UTC) or None if parsing fails
         """
         # Try parsed time struct first
         if hasattr(entry, "published_parsed") and entry.published_parsed:
             try:
-                return datetime.fromtimestamp(mktime(entry.published_parsed))
+                return self._struct_to_utc(entry.published_parsed)
             except (TypeError, ValueError, OverflowError):
                 pass
 
         # Try updated_parsed as fallback
         if hasattr(entry, "updated_parsed") and entry.updated_parsed:
             try:
-                return datetime.fromtimestamp(mktime(entry.updated_parsed))
+                return self._struct_to_utc(entry.updated_parsed)
             except (TypeError, ValueError, OverflowError):
                 pass
 
         return None
+
+    @staticmethod
+    def _struct_to_utc(parsed: Any) -> datetime:
+        """Convert a feedparser UTC ``struct_time`` to a naive UTC ``datetime``."""
+        return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc).replace(
+            tzinfo=None
+        )

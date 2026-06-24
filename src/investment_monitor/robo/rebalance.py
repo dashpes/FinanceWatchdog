@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from loguru import logger
+from sqlalchemy import func, select
 
 from investment_monitor.config import Settings
 from investment_monitor.robo.audit import AuditLogger
@@ -42,7 +43,6 @@ from investment_monitor.storage import (
     finalize_robo_run,
     get_active_symbols,
     get_active_theses,
-    get_recent_robo_runs,
     get_unfilled_placed_orders,
     get_session,
     init_db,
@@ -102,21 +102,63 @@ def _build_local_llm(config: RoboConfig, settings: Settings):
     return LocalLLM(model=model, base_url=settings.ollama_host)
 
 
-def _reconcile_fill_costs(session, account: AccountState) -> None:
-    """Persist the broker's real cost basis onto each active thesis.
+def _thesis_entry_fill_cost(session, thesis) -> float | None:
+    """Fill price of the order that actually OPENED *this* thesis's position, or None.
 
-    Writes ``entry_conditions['fill_cost']`` = the position's broker unit cost, so the
-    feedback loop scores realized return against the *actual fill price* rather than the
-    quote captured when the idea was written — and only for names we genuinely hold.
+    Returns the fill price of the earliest reconciled BUY for the thesis's symbol that
+    was placed at/after the thesis was created — i.e. the robo's own entry order for
+    this idea. Deliberately ignores:
+      * the broker's *blended* unit cost (which folds in shares bought before/independent
+        of the thesis, or later adds at different prices), and
+      * any BUY recorded before the thesis existed (a pre-existing holding).
+    Returns None when no entry-corresponding fill exists, so the caller keeps the
+    idea-time ``entry_price`` as the basis rather than measuring return from the wrong
+    price. Fail-open: any error yields None.
+    """
+    try:
+        stmt = (
+            select(RoboOrder)
+            .where(RoboOrder.symbol == thesis.symbol)
+            .where(RoboOrder.side == OrderSide.BUY.value)
+            .where(RoboOrder.fill_price.is_not(None))
+            .order_by(RoboOrder.created_at.asc())
+        )
+        thesis_created = getattr(thesis, "created_at", None)
+        for order_row in session.scalars(stmt):
+            # Only the robo's own opening order counts: skip BUYs that predate the
+            # thesis (a position held before/independently of this idea).
+            if thesis_created is not None and order_row.created_at is not None:
+                if order_row.created_at < thesis_created:
+                    continue
+            if order_row.fill_price and order_row.fill_price > 0:
+                return float(order_row.fill_price)
+    except Exception as exc:  # noqa: BLE001 - matching is best-effort context only
+        logger.warning("entry-fill match failed for {s}: {e}", s=thesis.symbol, e=exc)
+    return None
+
+
+def _reconcile_fill_costs(session, account: AccountState) -> None:
+    """Persist the thesis's own entry fill cost onto each active thesis.
+
+    Writes ``entry_conditions['fill_cost']`` = the fill price of the order that actually
+    OPENED this thesis's position, so the feedback loop scores realized return against
+    the *actual entry fill* — NOT the broker's blended unit cost. The blended average
+    folds in shares held before/independent of the thesis (or later adds at a different
+    price), so for such names it is not the thesis entry and would bias calibration.
+    When there is no entry-corresponding fill we leave ``entry_price`` as the basis
+    rather than overwrite it with the wrong price.
+
     Fully fail-open: a reconcile error must never abort a rebalance run, and it is a
-    no-op in paper/dry-run (no broker cost basis), keeping that path byte-identical.
+    no-op in paper/dry-run (no live entry fills exist), keeping that path byte-identical.
     """
     try:
         for thesis in get_active_theses(session, account.account_id or None):
-            pos = account.get_position(thesis.symbol)
-            if pos is None or pos.unit_cost is None or pos.unit_cost <= 0:
+            # Only for names we genuinely hold (a fill could be a since-closed position).
+            if account.get_position(thesis.symbol) is None:
                 continue
-            new_cost = float(pos.unit_cost)
+            new_cost = _thesis_entry_fill_cost(session, thesis)
+            if new_cost is None:
+                continue
             entry = dict(thesis.entry_conditions or {})
             if entry.get("fill_cost") != new_cost:
                 entry["fill_cost"] = new_cost
@@ -126,14 +168,28 @@ def _reconcile_fill_costs(session, account: AccountState) -> None:
 
 
 def _apply_fill(order_row, info: dict) -> bool:
-    """Apply a parsed ``get_order`` fill onto a RoboOrder row. Returns True if the
-    order reached a terminal state (so it no longer needs polling)."""
+    """Apply a parsed ``get_order`` fill onto a RoboOrder row. Returns True ONLY if the
+    order reached a genuinely terminal STATUS (so it no longer needs polling).
+
+    Terminality is driven by ``info['terminal']`` (the broker order status), NOT by the
+    mere presence of an ``average_price``. A PARTIALLY_FILLED order carries an
+    ``average_price`` / ``filled_quantity`` for the shares filled so far but is still
+    working — we record that partial progress yet keep ``fill_status`` NULL (the "still
+    polling" sentinel ``get_unfilled_placed_orders`` keys on) so the remainder is
+    reconciled on a later run. Latching it terminal here would strand the unfilled
+    shares forever.
+    """
+    terminal = bool(info.get("terminal"))
     if info.get("average_price") is not None:
+        # Record progress whether partial or fully filled (shares filled so far).
         order_row.fill_price = float(info["average_price"])
         order_row.fill_quantity = float(info.get("filled_quantity") or 0)
-        order_row.fill_status = info.get("status") or "FILLED"
-        return True
-    if info.get("terminal"):  # rejected / cancelled / expired — done, no fill
+        if terminal:
+            order_row.fill_status = info.get("status") or "FILLED"
+            return True
+        # Still working (e.g. PARTIALLY_FILLED): leave fill_status NULL, poll again.
+        return False
+    if terminal:  # rejected / cancelled / expired — done, no fill
         order_row.fill_quantity = 0.0
         order_row.fill_status = info.get("status") or "TERMINAL"
         return True
@@ -143,9 +199,16 @@ def _apply_fill(order_row, info: dict) -> bool:
 def _reconcile_order_fills(session, broker: PublicBroker) -> None:
     """Poll the broker for fills of previously-placed orders not yet reconciled.
 
-    Read-only and fail-open: a poll error on one order must never abort the run. A
-    no-op in paper (no live placements exist to reconcile).
+    Read-only and fail-open: a poll error on one order must never abort the run.
+
+    Skipped entirely in dry-run: a paper run must be fully read-isolated from the live
+    broker. Unfilled rows are real LIVE placements left by an earlier live run; calling
+    ``broker.get_order`` on them here would make an authenticated read against the real
+    broker from a paper run. We leave them untouched so the next LIVE run reconciles
+    them (fill_status stays NULL, so they remain in the unfilled-poll set).
     """
+    if getattr(broker, "dry_run", False):
+        return
     try:
         pending = get_unfilled_placed_orders(session)
     except Exception as exc:  # noqa: BLE001
@@ -435,18 +498,20 @@ def _drawdown_halt(
     if config.caps.max_drawdown_pct <= 0 or current_total <= 0:
         return False
     try:
-        # Wide lookback so the true peak isn't silently truncated (the breaker would
-        # otherwise under-state drawdown and let buys through during a real decline).
-        runs = get_recent_robo_runs(session, limit=5000)
+        # True ALL-TIME high-water mark via a DB aggregate (MAX over every run for this
+        # account), NOT a capped recent window. Under a 24/7 every-few-minutes schedule
+        # the run table exceeds any fixed row cap within weeks, so a windowed peak would
+        # silently age the real peak out, under-state drawdown, and let buys through
+        # during a genuine decline. The aggregate never truncates.
+        stmt = select(func.max(RoboRun.total_value))
+        if account_id:
+            stmt = stmt.where(RoboRun.account_id == account_id)
+        peak_value = session.scalar(stmt)
     except Exception as exc:  # noqa: BLE001 - history read must never break a run
         logger.warning("Drawdown history read failed ({e}); breaker not evaluated", e=exc)
         return False
-    peaks = [
-        Decimal(str(r.total_value))
-        for r in runs
-        if r.total_value and (not account_id or r.account_id == account_id)
-    ]
-    peak = max([current_total, *peaks])
+    recorded_peak = Decimal(str(peak_value)) if peak_value is not None else Decimal("0")
+    peak = max(current_total, recorded_peak)
     if peak <= 0:
         return False
     drawdown_pct = float((peak - current_total) / peak * 100)

@@ -49,22 +49,50 @@ def get_robo_orders_for_run(session: Session, run_id: str) -> list[RoboOrder]:
     return list(session.scalars(stmt))
 
 
-def get_unfilled_placed_orders(session: Session, limit: int = 100) -> list[RoboOrder]:
+def get_unfilled_placed_orders(
+    session: Session, limit: int | None = None, *, batch_size: int = 100
+) -> list[RoboOrder]:
     """Live orders placed at the broker but not yet reconciled to a terminal state.
 
     These need a ``get_order`` poll to capture the fill (or a reject/cancel). The
     ``fill_status IS NULL`` sentinel means "still polling"; once resolved it is set,
     so an order is reconciled at most until it reaches a terminal state.
+
+    Reconciliation is the ONLY thing that clears the unfilled state, so it must
+    eventually see every unfilled order. With a fixed cap, any unfilled orders past
+    that cap (e.g. a backlog from a broker outage / many working orders) would never
+    be reconciled, no matter how many runs occur. By default (``limit is None``) this
+    paginates oldest-first in batches of ``batch_size`` until the result is exhausted,
+    so all unfilled orders are returned. ``limit`` may still cap the total for callers
+    that want a bounded page.
     """
-    stmt = (
-        select(RoboOrder)
-        .where(RoboOrder.placed.is_(True))
-        .where(RoboOrder.broker_order_id.is_not(None))
-        .where(RoboOrder.fill_status.is_(None))
-        .order_by(RoboOrder.created_at.asc())
-        .limit(limit)
-    )
-    return list(session.scalars(stmt))
+
+    def _page(offset: int, size: int) -> list[RoboOrder]:
+        stmt = (
+            select(RoboOrder)
+            .where(RoboOrder.placed.is_(True))
+            .where(RoboOrder.broker_order_id.is_not(None))
+            .where(RoboOrder.fill_status.is_(None))
+            .order_by(RoboOrder.created_at.asc())
+            .offset(offset)
+            .limit(size)
+        )
+        return list(session.scalars(stmt))
+
+    if limit is not None:
+        return _page(0, limit)
+
+    results: list[RoboOrder] = []
+    offset = 0
+    while True:
+        page = _page(offset, batch_size)
+        if not page:
+            break
+        results.extend(page)
+        if len(page) < batch_size:
+            break
+        offset += batch_size
+    return results
 
 
 def count_placed_orders_today(session: Session) -> int:

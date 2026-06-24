@@ -10,6 +10,31 @@ from loguru import logger
 from .base import BaseCollector, CollectorResult
 from ..storage import InsiderTransaction, insider_transaction_exists, save_insider_transaction
 
+# Issuer symbols that are NOT real tickers. Some Form 4 filings and congressional
+# disclosures carry these placeholders literally. This is the SINGLE source of
+# truth (see is_junk_ticker) shared by the insider, congress, and news collectors
+# and the confluence engine, so the set can't silently diverge across them. It is
+# the UNION of every entry those call sites historically filtered.
+JUNK_TICKERS = frozenset({"", "NONE", "N/A", "NA", "--", "N\\A"})
+
+# Additional non-issuer tokens that show up as bogus RSS cashtags ($USD, $CEO,
+# $WSJ, ...) but are not literal placeholders in filings. Applied ONLY on the
+# broad-news cashtag path so the (real) insider/congress symbol filter is
+# unchanged.
+JUNK_CASHTAGS = frozenset({"USD", "CEO", "WSJ"})
+
+
+def is_junk_ticker(ticker: str | None) -> bool:
+    """True if ``ticker`` is a placeholder/non-issuer token, not a real symbol.
+
+    Case- and whitespace-insensitive: ``None``, the empty string, and known junk
+    placeholders ('NONE', 'N/A', 'NA', '--', etc.) all return True so they never
+    reach the DB or the confluence engine.
+    """
+    if ticker is None:
+        return True
+    return ticker.strip().upper() in JUNK_TICKERS
+
 
 class InsiderCollector(BaseCollector):
     """
@@ -196,14 +221,58 @@ class InsiderCollector(BaseCollector):
         response.raise_for_status()
         return response.text
 
+    # Extra TRADING days to look back beyond the requested span. A weekday market
+    # holiday (e.g. a Monday holiday) leaves the immediately-preceding trading day's
+    # late-filed Form 4s unposted at our last run, so a fixed +1 weekday bridge can
+    # silently skip them: a Tuesday-after-a-Monday-holiday run that only reaches
+    # Monday misses the prior Friday's late filings. Bridging several real trading
+    # days spans any single holiday gap (the longest US-market closures are a single
+    # weekday, so a 3+ Thu-Fri / weekend / Mon-holiday run is the worst case). Dedup
+    # by ``sec_url`` makes the extra overlap a harmless no-op.
+    _BRIDGE_TRADING_DAYS = 4
+
+    def _is_trading_day(self, d: date) -> bool:
+        """True if ``d`` is a US-market trading day (weekday and not a known holiday).
+
+        Reuses ``market_hours``' hardcoded NYSE holiday calendar when importable so
+        the holiday knowledge has a single source of truth; if that import is
+        unavailable for any reason we fail OPEN (weekday-only) — over-covering a
+        holiday index is harmless (a missing index is skipped), but skipping a real
+        trading day would silently drop filings.
+        """
+        if d.weekday() >= 5:  # Sat / Sun
+            return False
+        try:
+            from ..robo.market_hours import _HOLIDAYS
+        except Exception:  # noqa: BLE001 - fail open: weekend filter still applies
+            return True
+        return d not in _HOLIDAYS
+
     def _recent_business_dates(self, days_back: int) -> list[date]:
-        """The last ``days_back`` calendar days, weekdays only (newest first)."""
+        """The most recent TRADING days with filings (newest first).
+
+        Counts *trading* days (Mon-Fri excluding NYSE holidays), not calendar days,
+        anchored at the most recent trading day on/before today, so a weekend OR
+        holiday run still bridges back to the last open day instead of returning an
+        empty list (EDGAR/markets don't file on weekends or holidays). We also always
+        include several extra prior trading days beyond the requested span
+        (``_BRIDGE_TRADING_DAYS``): that bridge guarantees the previous trading day's
+        late-filed Form 4s are picked up — including across a weekday holiday gap,
+        where a fixed +1 weekday bridge would silently skip the day before the
+        holiday (e.g. a Tuesday run after a Monday holiday still reaches the prior
+        Friday). Dedup by ``sec_url`` makes re-covering a day idempotent.
+        """
+        want = max(1, days_back) + self._BRIDGE_TRADING_DAYS
         out: list[date] = []
-        today = date.today()
-        for i in range(max(1, days_back)):
-            day = today - timedelta(days=i)
-            if day.weekday() < 5:  # Mon-Fri (markets/EDGAR don't file weekends)
+        day = date.today()
+        # Anchor at the most recent trading day on/before today (skip weekends AND
+        # holidays), then walk back collecting only trading days.
+        while not self._is_trading_day(day):
+            day -= timedelta(days=1)
+        while len(out) < want:
+            if self._is_trading_day(day):
                 out.append(day)
+            day -= timedelta(days=1)
         return out
 
     def _daily_index_url(self, d: date) -> str:
@@ -433,7 +502,7 @@ class InsiderCollector(BaseCollector):
             ticker = sym.text.strip().upper() if sym and sym.text else None
             # Some filings carry junk placeholders ('NONE'/'N/A'/'NA'/'--'/'') instead
             # of a real symbol — treat those as no ticker so they never reach the DB.
-            if ticker in (None, "", "NONE", "N/A", "NA", "--"):
+            if is_junk_ticker(ticker):
                 return []  # can't attribute a transaction without an issuer ticker
 
         # Extract owner information

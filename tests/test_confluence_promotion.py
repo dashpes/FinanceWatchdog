@@ -139,3 +139,38 @@ def test_falling_knife_not_repromoted_from_same_finding(tmp_path):
         ))
     with get_session() as s:
         assert promote_confluence_findings(s, min_score=4.0) == []
+
+
+def test_same_day_fresh_finding_repromotes_invalidated_name(tmp_path):
+    # A self-invalidated name MUST be re-promoted on a genuinely NEW (different) finding
+    # produced on the SAME calendar day a thesis was last evaluated — a same-day fresh,
+    # stronger cross-source signal is a real trade, not a falling knife. Only the SAME
+    # (or strictly older) finding is the falling knife we must refuse.
+    from datetime import datetime
+
+    from investment_monitor.storage import (
+        Thesis, ThesisStatus, get_recent_findings, save_thesis,
+    )
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        # Original (weaker) finding that drove the first buy, then a brand-new stronger
+        # finding produced the very same day. Both dated TODAY.
+        _seed_finding(s, "REBORN", 5.0)
+        _seed_finding(s, "REBORN", 9.0)
+        _seed_price(s, "REBORN")
+    with get_session() as s:
+        # The finding recorded on the invalidated thesis is the ORIGINAL (weaker) one,
+        # NOT the new strongest one promotion will now consider.
+        findings = get_recent_findings(s, min_score=4.0, max_age_days=3)
+        original = min(findings, key=lambda f: f.score)
+        save_thesis(s, Thesis(
+            symbol="REBORN", narrative="x", conviction=0.0,
+            status=ThesisStatus.INVALIDATED.value,
+            evidence_refs={"confluence_finding_id": original.id},
+            # Last evaluated TODAY (same calendar day as the fresh finding's as_of_date).
+            last_evaluated_at=datetime.combine(TODAY, datetime.min.time()),
+        ))
+    with get_session() as s:
+        # The new, stronger, same-day finding re-promotes the name.
+        assert promote_confluence_findings(s, min_score=4.0) == ["REBORN"]
+        assert {t.symbol for t in get_active_theses(s)} == {"REBORN"}

@@ -13,9 +13,21 @@ from enum import Enum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from investment_monitor.robo.models import CASH_SYMBOL
+
+
+class ConfigError(ValueError):
+    """A robo.yaml that fails validation, surfaced as a single clear message.
+
+    Raised by ``RoboConfig.from_yaml`` instead of letting a raw pydantic
+    ``ValidationError`` (or a YAML parse error) escape. A bad config file must
+    never crash a CLI command or a launchd daemon with an unhandled traceback —
+    the caller logs this message and exits cleanly instead of silently halting
+    the autonomous trader. Subclasses ``ValueError`` so existing ``except
+    ValueError`` handlers (e.g. the ``config set`` path) keep working.
+    """
 
 
 class Mode(str, Enum):
@@ -385,9 +397,43 @@ class RoboConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> "RoboConfig":
-        """Load and validate robo config from a YAML file (defaults if missing)."""
+        """Load and validate robo config from a YAML file (defaults if missing).
+
+        Any validation or parse failure is re-raised as a single, actionable
+        :class:`ConfigError` (which key, the bound, the offending value) so a
+        bad file can never crash a daemon with a raw traceback.
+        """
         if not path.exists():
             return cls()
-        with open(path) as f:
-            data = yaml.safe_load(f) or {}
-        return cls(**data)
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"could not parse {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError(
+                f"{path} must contain a YAML mapping at the top level, "
+                f"got {type(data).__name__}"
+            )
+        try:
+            return cls(**data)
+        except ValidationError as exc:
+            raise ConfigError(_format_validation_error(path, exc)) from exc
+
+
+def _format_validation_error(path: Path, exc: ValidationError) -> str:
+    """Render a pydantic ValidationError as one clear, actionable message.
+
+    Names the dotted setting key, the offending value, and the violated bound
+    for each problem so the operator can fix robo.yaml without reading a
+    traceback.
+    """
+    lines = [f"invalid robo config in {path}:"]
+    for err in exc.errors():
+        key = ".".join(str(p) for p in err["loc"]) or "(root)"
+        msg = err["msg"]
+        if "input" in err:
+            lines.append(f"  - {key}: {msg} (got {err['input']!r})")
+        else:
+            lines.append(f"  - {key}: {msg}")
+    return "\n".join(lines)

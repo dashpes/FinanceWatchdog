@@ -246,6 +246,22 @@ class TestParseTrade:
         trade = collector.parse_trade(raw, "House")
         assert trade is None
 
+    @pytest.mark.parametrize("junk", ["NONE", "none", "NA", "na", "N\\A", "n/a", "  "])
+    def test_parse_trade_shared_junk_ticker_filter(self, collector, junk):
+        """#15: junk placeholders are dropped via the SHARED is_junk_ticker helper.
+
+        The old inline check only filtered '--'/'N/A'; centralizing extends congress to
+        the full union (NONE/NA/N\\A/...), so non-issuer tokens never become trades.
+        """
+        raw = {
+            "representative": "Hon. Test",
+            "ticker": junk,
+            "type": "purchase",
+            "amount": "$1,000",
+            "transaction_date": "2023-11-15",
+        }
+        assert collector.parse_trade(raw, "House") is None
+
     def test_parse_trade_sale_partial(self, collector):
         """Test parsing partial sale trade."""
         raw = SAMPLE_HOUSE_TRADES[2]

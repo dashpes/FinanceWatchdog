@@ -34,6 +34,8 @@ class Tunable:
     default: Any
     minimum: float | None
     maximum: float | None
+    minimum_exclusive: bool  # True if minimum came from exclusiveMinimum (strict >)
+    maximum_exclusive: bool  # True if maximum came from exclusiveMaximum (strict <)
     choices: list[str] | None
     group: str
     control: str | None  # UI hint: slider | stepper | toggle | select
@@ -68,14 +70,22 @@ def _entry(key: str, node: dict) -> Tunable:
     typ = node.get("type")
     ui_type = "enum" if choices else (typ if typ in ("integer", "number", "boolean", "string") else (typ or "string"))
     xui = node.get("x_ui") or {}
+    # Prefer inclusive bounds; fall back to exclusive ones, tracking which kind so
+    # coerce() can use strict comparison for exclusive bounds (gt/lt fields).
+    has_incl_min = "minimum" in node
+    has_incl_max = "maximum" in node
+    minimum = node.get("minimum", node.get("exclusiveMinimum"))
+    maximum = node.get("maximum", node.get("exclusiveMaximum"))
     return Tunable(
         key=key,
         title=node.get("title", key),
         description=node.get("description", ""),
         type=ui_type,
         default=node.get("default"),
-        minimum=node.get("minimum", node.get("exclusiveMinimum")),
-        maximum=node.get("maximum", node.get("exclusiveMaximum")),
+        minimum=minimum,
+        maximum=maximum,
+        minimum_exclusive=(minimum is not None and not has_incl_min),
+        maximum_exclusive=(maximum is not None and not has_incl_max),
         choices=list(choices) if choices else None,
         group=xui.get("group", "General"),
         control=xui.get("control"),
@@ -150,10 +160,16 @@ def coerce(key: str, raw: str) -> Any:
             raise ValueError(f"{key}: expected a number, got '{raw}'") from None
     else:
         return raw
-    if t.minimum is not None and v < t.minimum:
-        raise ValueError(f"{key}: {v} is below the minimum {t.minimum}")
-    if t.maximum is not None and v > t.maximum:
-        raise ValueError(f"{key}: {v} is above the maximum {t.maximum}")
+    if t.minimum is not None:
+        if t.minimum_exclusive and v <= t.minimum:
+            raise ValueError(f"{key}: {v} must be greater than {t.minimum}")
+        if not t.minimum_exclusive and v < t.minimum:
+            raise ValueError(f"{key}: {v} is below the minimum {t.minimum}")
+    if t.maximum is not None:
+        if t.maximum_exclusive and v >= t.maximum:
+            raise ValueError(f"{key}: {v} must be less than {t.maximum}")
+        if not t.maximum_exclusive and v > t.maximum:
+            raise ValueError(f"{key}: {v} is above the maximum {t.maximum}")
     return v
 
 

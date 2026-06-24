@@ -246,3 +246,168 @@ def test_unbuyable_preflight_failure_is_learned_into_blocklist(tmp_path):
     assert result.num_placed == 0
     learned = load_learned(str(settings.db_path))
     assert {"VOO", "SCHD"} <= learned  # both refused buys recorded
+
+
+# --------------------------------------------------------------------------- #
+# Finding #9 — fill_cost must come from THIS thesis's own entry order, not the
+# broker's blended unit cost for any held symbol.
+# --------------------------------------------------------------------------- #
+def _save_thesis(session, symbol, created_at, entry_price=100.0, account_id="ACC1"):
+    from investment_monitor.storage import Thesis, ThesisStatus, save_thesis
+
+    t = Thesis(
+        symbol=symbol, account_id=account_id, narrative="x", conviction=0.6,
+        status=ThesisStatus.ACTIVE.value,
+        entry_conditions={"entry_price": entry_price},
+        invalidation_conditions={}, evidence_refs={}, conviction_history=[],
+    )
+    save_thesis(session, t)
+    t.created_at = created_at  # control the entry-order time window deterministically
+    session.flush()
+    return t
+
+
+def _filled_buy(session, symbol, created_at, fill_price, run_id="r1"):
+    from investment_monitor.storage import RoboOrder, save_robo_order
+
+    o = RoboOrder(run_id=run_id, symbol=symbol, side="buy", order_type="market",
+                  quantity=1.0, source="deterministic", placed=True,
+                  broker_order_id=f"{symbol}-{fill_price}", status="placed",
+                  fill_price=fill_price, fill_quantity=1.0, fill_status="FILLED")
+    save_robo_order(session, o)
+    o.created_at = created_at
+    session.flush()
+    return o
+
+
+def test_fill_cost_uses_thesis_own_entry_order_not_blended_basis(tmp_path):
+    # The position carries a BLENDED broker unit_cost (e.g. 450), but the order that
+    # actually opened THIS thesis filled at 470. fill_cost must record 470, not 450.
+    import datetime as _dt
+
+    from investment_monitor.robo.models import Position
+    from investment_monitor.robo.rebalance import _reconcile_fill_costs
+    from investment_monitor.storage import get_active_theses, get_session, init_db
+
+    init_db(tmp_path / "t.db")
+    t0 = _dt.datetime(2026, 6, 1, tzinfo=_dt.timezone.utc)
+    acct = cash_account("100", positions=[
+        Position(symbol="VOO", quantity=Decimal("2"), price=Decimal("500"),
+                 unit_cost=Decimal("450")),  # broker blended basis (NOT the thesis entry)
+    ])
+    with get_session() as s:
+        _save_thesis(s, "VOO", created_at=t0, entry_price=480.0)
+        # The thesis's own entry order filled at 470, AFTER the thesis was created.
+        _filled_buy(s, "VOO", created_at=t0 + _dt.timedelta(minutes=5), fill_price=470.0)
+    with get_session() as s:
+        _reconcile_fill_costs(s, acct)
+    with get_session() as s:
+        th = get_active_theses(s, "ACC1")[0]
+        assert th.entry_conditions["fill_cost"] == 470.0  # the entry fill, not 450
+
+
+def test_fill_cost_not_set_for_preexisting_holding(tmp_path):
+    # A symbol held BEFORE the thesis (its only filled buy predates thesis creation):
+    # there is no entry-corresponding fill, so fill_cost must NOT be written and the
+    # idea-time entry_price stays the basis.
+    import datetime as _dt
+
+    from investment_monitor.robo.models import Position
+    from investment_monitor.robo.rebalance import _reconcile_fill_costs
+    from investment_monitor.storage import get_active_theses, get_session, init_db
+
+    init_db(tmp_path / "t.db")
+    thesis_created = _dt.datetime(2026, 6, 10, tzinfo=_dt.timezone.utc)
+    acct = cash_account("100", positions=[
+        Position(symbol="VOO", quantity=Decimal("2"), price=Decimal("500"),
+                 unit_cost=Decimal("450")),
+    ])
+    with get_session() as s:
+        _save_thesis(s, "VOO", created_at=thesis_created, entry_price=480.0)
+        # Buy filled a week BEFORE the thesis existed -> pre-existing holding.
+        _filled_buy(s, "VOO", created_at=thesis_created - _dt.timedelta(days=7),
+                    fill_price=470.0)
+    with get_session() as s:
+        _reconcile_fill_costs(s, acct)
+    with get_session() as s:
+        th = get_active_theses(s, "ACC1")[0]
+        assert "fill_cost" not in th.entry_conditions       # not overwritten
+        assert th.entry_conditions["entry_price"] == 480.0  # idea-time basis kept
+
+
+def test_fill_cost_skipped_when_symbol_not_held(tmp_path):
+    # A thesis whose symbol is no longer held must not get a fill_cost from a stale fill.
+    import datetime as _dt
+
+    from investment_monitor.robo.rebalance import _reconcile_fill_costs
+    from investment_monitor.storage import get_active_theses, get_session, init_db
+
+    init_db(tmp_path / "t.db")
+    t0 = _dt.datetime(2026, 6, 1, tzinfo=_dt.timezone.utc)
+    acct = cash_account("100")  # holds nothing
+    with get_session() as s:
+        _save_thesis(s, "VOO", created_at=t0, entry_price=480.0)
+        _filled_buy(s, "VOO", created_at=t0 + _dt.timedelta(minutes=5), fill_price=470.0)
+    with get_session() as s:
+        _reconcile_fill_costs(s, acct)
+    with get_session() as s:
+        th = get_active_theses(s, "ACC1")[0]
+        assert "fill_cost" not in th.entry_conditions
+
+
+# --------------------------------------------------------------------------- #
+# Drawdown breaker — true ALL-TIME peak via aggregate, not a capped window.
+# --------------------------------------------------------------------------- #
+def test_drawdown_halt_uses_alltime_peak_beyond_recent_window(tmp_path):
+    # An old, very-high peak that would age out of any fixed recent-row window must
+    # still be the high-water mark: the breaker computes MAX(total_value) over ALL runs,
+    # so a real drawdown from that peak still halts buys.
+    import datetime as _dt
+
+    from investment_monitor.robo.config import RoboCaps, RoboConfig
+    from investment_monitor.robo.rebalance import _drawdown_halt
+    from investment_monitor.storage import RoboRun, get_session, init_db, save_robo_run
+
+    init_db(tmp_path / "t.db")
+    base = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    with get_session() as s:
+        # One very old high peak, then many newer, lower runs (the kind that would
+        # crowd the old peak out of a capped recent window).
+        old = RoboRun(run_id="peak", dry_run=False, account_id="ACC1",
+                      total_value=200.0, status="completed")
+        save_robo_run(s, old)
+        old.started_at = base
+        s.flush()
+        for i in range(50):
+            r = RoboRun(run_id=f"r{i}", dry_run=False, account_id="ACC1",
+                        total_value=120.0, status="completed")
+            save_robo_run(s, r)
+            r.started_at = base + _dt.timedelta(days=i + 1)
+            s.flush()
+
+    cfg = RoboConfig(target_allocation={"VOO": 1.0}, allowlist=["VOO"], use_llm=False,
+                     caps=RoboCaps(max_drawdown_pct=25.0))
+    with get_session() as s:
+        # current 120 vs all-time peak 200 -> 40% drawdown >= 25% -> halt.
+        assert _drawdown_halt(s, cfg, Decimal("120"), "ACC1") is True
+        # current 160 vs peak 200 -> 20% < 25% -> no halt.
+        assert _drawdown_halt(s, cfg, Decimal("160"), "ACC1") is False
+
+
+def test_drawdown_halt_scoped_per_account(tmp_path):
+    # Another account's higher peak must not pin this account's drawdown.
+    from investment_monitor.robo.config import RoboCaps, RoboConfig
+    from investment_monitor.robo.rebalance import _drawdown_halt
+    from investment_monitor.storage import RoboRun, get_session, init_db, save_robo_run
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_robo_run(s, RoboRun(run_id="a", dry_run=False, account_id="ACC1",
+                                 total_value=100.0, status="completed"))
+        save_robo_run(s, RoboRun(run_id="b", dry_run=False, account_id="OTHER",
+                                 total_value=1000.0, status="completed"))
+    cfg = RoboConfig(target_allocation={"VOO": 1.0}, allowlist=["VOO"], use_llm=False,
+                     caps=RoboCaps(max_drawdown_pct=25.0))
+    with get_session() as s:
+        # ACC1 peak is 100; current 100 -> 0% drawdown, OTHER's 1000 ignored.
+        assert _drawdown_halt(s, cfg, Decimal("100"), "ACC1") is False

@@ -209,6 +209,15 @@ def account_state_from_raw(
             total_cost = _to_decimal(_first(cb, "total_cost", "totalCost"))
             if total_cost is not None and quantity > 0:
                 unit_cost = total_cost / quantity
+        # A negative/odd cost basis is a bad payload, not a real price. Clamp it to
+        # None ("unknown") here so it can never raise or distort P&L — a quirky
+        # cost-basis field must never block the whole account snapshot / trading run.
+        if unit_cost is not None and unit_cost < 0:
+            logger.warning(
+                "Ignoring invalid unit_cost {uc} for {sym} (treating basis as unknown)",
+                uc=unit_cost, sym=symbol,
+            )
+            unit_cost = None
         unrealized_gain = _to_decimal(_first(cb, "gain_value", "gainValue"))
         unrealized_gain_pct = _to_decimal(_first(cb, "gain_percentage", "gainPercentage"))
         positions.append(
@@ -296,8 +305,15 @@ def fill_from_order_raw(raw: Any) -> dict[str, Any]:
     """Extract fill info from a ``get_order`` payload (pure, unit-testable).
 
     Returns ``{status, average_price, filled_quantity, terminal}``. ``average_price``
-    / ``filled_quantity`` are None until the order trades; ``terminal`` is True once
-    the order has reached a final state (filled or rejected/cancelled).
+    / ``filled_quantity`` are None until the order trades; ``terminal`` is True ONLY
+    once the order STATUS is a final state (filled / cancelled / rejected / expired /
+    replaced).
+
+    Terminality is keyed on the status alone, NOT on the mere presence of an
+    ``average_price``: a PARTIALLY_FILLED order reports an ``average_price`` for the
+    shares filled so far but is still working, so it must keep being polled until the
+    rest fills (or it is cancelled). Latching it terminal on first sight would strand
+    the unfilled remainder, never reconciling the shares that fill later.
     """
     d = _as_dict(raw)
     status = str(_first(d, "status", "orderStatus", "order_status", default="")).upper()
@@ -307,7 +323,7 @@ def fill_from_order_raw(raw: Any) -> dict[str, Any]:
         "status": status,
         "average_price": avg_price,
         "filled_quantity": filled_qty,
-        "terminal": status in _TERMINAL_ORDER_STATUSES or avg_price is not None,
+        "terminal": status in _TERMINAL_ORDER_STATUSES,
     }
 
 

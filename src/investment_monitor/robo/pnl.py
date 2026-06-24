@@ -11,6 +11,7 @@ unit-testable and deterministic.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
@@ -54,14 +55,32 @@ def realized_pnl(trades: list[Trade]) -> RealizedPnL:
     defensive guard that should not arise in a long-only account, but keeps the
     accounting from going negative on a gap in the history window.
 
-    Trades are processed oldest-first. If timestamps are present they are sorted;
-    otherwise the input order is trusted (the broker returns history in order).
+    Trades are processed oldest-first. Trades that carry a timestamp are ordered
+    chronologically; trades with no timestamp keep their relative input order and
+    are pushed to the end (the broker returns history in order). The sort key is
+    total-ordered for *any* combination of {None, tz-aware datetime, tz-naive
+    datetime}, so it never raises and never silently falls back to an unsorted
+    order — getting the chronology wrong would let a SELL be realized before its
+    matching BUY and understate the average-cost realized P&L.
     """
-    try:
-        ordered = sorted(trades, key=lambda t: t.timestamp)
-    except TypeError:
-        # Mixed/absent timestamps are not orderable — trust the given order.
-        ordered = list(trades)
+    # Every timestamp is normalized to a tz-aware UTC instant before comparison:
+    # a naive datetime is assumed UTC (``replace(tzinfo=...)``), so a mix of
+    # aware and naive timestamps — which Python otherwise refuses to compare —
+    # becomes a single total order. The ``is None`` flag sorts timestamp-less
+    # trades after timestamped ones, and ``_epoch`` (also tz-aware) is a harmless
+    # placeholder only ever used inside the all-None group, where the flag is
+    # constant and ``sorted``'s stability preserves input order.
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+
+    def _sort_key(t: Trade) -> tuple[bool, datetime]:
+        ts = t.timestamp
+        if ts is None:
+            return (True, _epoch)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (False, ts)
+
+    ordered = sorted(trades, key=_sort_key)
 
     state: dict[str, SymbolPnL] = {}
     for t in ordered:

@@ -7,6 +7,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from .base import BaseCollector, CollectorResult
+from .insider import is_junk_ticker
 from ..storage import CongressionalTrade, save_congressional_trade
 
 
@@ -172,9 +173,10 @@ class CongressTradesCollector(BaseCollector):
             if not politician:
                 return None
 
-            # Get ticker - required field
+            # Get ticker - required field. Drop placeholders/non-issuer tokens via
+            # the shared junk-ticker filter so the set can't diverge across sources.
             ticker = raw.get("ticker", "").strip().upper()
-            if not ticker or ticker == "--" or ticker == "N/A":
+            if is_junk_ticker(ticker):
                 return None
 
             # Get trade type and normalize

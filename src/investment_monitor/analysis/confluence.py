@@ -27,6 +27,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from investment_monitor.collectors.insider import is_junk_ticker
 from investment_monitor.config import Settings, get_settings
 from investment_monitor.storage import (
     ConfluenceFinding,
@@ -40,9 +41,6 @@ from investment_monitor.storage import (
     init_db,
     save_finding,
 )
-
-# Issuer symbols that are not real tickers (some filings carry these literally).
-_JUNK_TICKERS = {"", "NONE", "N/A", "NA", "--", "N\\A"}
 
 # Owner-name tokens that mark a fund/entity 10%-holder rather than an individual
 # insider. A board cluster of individuals is the v1 signal; entity/activist buys are a
@@ -128,9 +126,17 @@ def score_confluence(
         return {"n_sources": 0, "n_actors": 0, "total_value": 0.0,
                 "median_per_actor": 0.0, "distinct_days": 0, "score": 0.0, "newest": None}
 
+    # Only DOLLAR-bearing actors (e.value is not None) define breadth and conviction.
+    # The volume/news pseudo-actors emit value=None: they corroborate via n_sources /
+    # source_mult (and the dispersion override), but if folded into by_actor they would
+    # both inflate the breadth headcount AND drag the per-actor median toward 0 — i.e.
+    # cross-source corroboration would paradoxically LOWER the conviction multiplier.
+    # So we exclude None-valued actors here while still counting their SOURCE below.
     by_actor: dict[tuple[str, str], float] = defaultdict(float)
     for e in evidence:
-        by_actor[(e.source, e.actor)] += max(0.0, e.value or 0.0)
+        if e.value is None:
+            continue  # pseudo-actor / unknown-$: corroborates via source, not breadth
+        by_actor[(e.source, e.actor)] += max(0.0, e.value)
     n_actors = len(by_actor)
     sources = {e.source for e in evidence}
     # News is weak/non-directional context: it never counts as a "strong" corroborating
@@ -188,7 +194,7 @@ def gather_insider_evidence(
     out: list[Evidence] = []
     for r in rows:
         ticker = (r.ticker or "").strip().upper()
-        if ticker in _JUNK_TICKERS:
+        if is_junk_ticker(ticker):
             continue
         actor = _normalize_actor(r.owner_name)
         if exclude_entities and _is_entity(actor):
@@ -251,17 +257,30 @@ def gather_news_evidence(
     corroborating attention, not a buy/sell signal. Requires >= ``min_items`` recent
     headlines to count, so a single stray article doesn't manufacture a source.
     """
+    # Score news by PUBLICATION time, so a backfill/re-ingest of weeks-old articles
+    # (created_at = now, published_at = stale) can't masquerade as fresh corroboration
+    # and inflate the multi-source score. get_recent_news filters by created_at
+    # (ingestion time), so we re-filter here to keep ONLY genuinely-recent articles —
+    # the same date dimension we score by.
     out: list[Evidence] = []
+    published_cutoff = today - timedelta(days=window_days)
     for ticker in tickers:
         try:
+            # Pull a generous candidate set by ingestion time, then keep only items
+            # actually PUBLISHED within the window. We over-fetch (drop the hours
+            # bound's recency role) because created_at recency is not what gates here.
             items = get_recent_news(session, ticker=ticker, hours=window_days * 24)
-            if len(items) < min_items:
+            pub_dates = [
+                i.published_at.date()
+                for i in items
+                if i.published_at and i.published_at.date() >= published_cutoff
+            ]
+            if len(pub_dates) < min_items:
                 continue
-            latest = max((i.published_at.date() for i in items if i.published_at),
-                         default=today)
+            latest = max(pub_dates)
             out.append(Evidence(
                 ticker=ticker, source="news", actor="news_flow", date=latest,
-                value=None, detail=f"{len(items)} recent headlines",
+                value=None, detail=f"{len(pub_dates)} recent headlines",
             ))
         except Exception as exc:  # noqa: BLE001 - news is best-effort context
             logger.debug(f"news evidence failed for {ticker}: {exc}")

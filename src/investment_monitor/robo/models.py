@@ -51,9 +51,23 @@ class Position(BaseModel):
     symbol: str
     quantity: Decimal = Field(..., ge=0)
     price: Decimal = Field(..., ge=0, description="Latest/last price per share")
+    # No `ge=0` constraint here on purpose: a quirky broker cost-basis payload (a
+    # negative/odd unitCost or totalCost) must NEVER raise inside the account snapshot
+    # and abort the whole rebalance run (that would refuse to trade for the run). The
+    # broker mapping sanitizes out-of-range values to None ("unknown") before building
+    # the Position; ``_sanitized_unit_cost`` enforces the same invariant for any other
+    # constructor so a stray negative basis can't reach the cost/return math.
     unit_cost: Decimal | None = Field(
-        default=None, ge=0, description="Average cost per share (broker cost basis)"
+        default=None, description="Average cost per share (broker cost basis); None if unknown"
     )
+
+    @model_validator(mode="after")
+    def _sanitized_unit_cost(self) -> "Position":
+        # Treat a negative unit_cost as unknown rather than a real basis. A real cost
+        # basis is >= 0; anything below that is a bad payload, not a meaningful price.
+        if self.unit_cost is not None and self.unit_cost < 0:
+            object.__setattr__(self, "unit_cost", None)
+        return self
     unrealized_gain: Decimal | None = Field(
         default=None, description="Unrealized P&L in dollars, broker-reported"
     )
