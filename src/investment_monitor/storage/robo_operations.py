@@ -49,6 +49,28 @@ def get_robo_orders_for_run(session: Session, run_id: str) -> list[RoboOrder]:
     return list(session.scalars(stmt))
 
 
+def get_filled_robo_orders(session: Session) -> list[RoboOrder]:
+    """The bot's own real, filled orders (oldest-first) — its executed-trade ledger.
+
+    Only orders the robo actually placed at the broker (``placed`` and NOT
+    ``simulated``) that carry a reconciled fill (both ``fill_price`` and
+    ``fill_quantity`` populated). This is the source of truth for realized P&L
+    attributed to the robo's *own theses*: it excludes any pre-existing or manual
+    positions in the shared brokerage account, which would otherwise leak in through
+    the account-wide trade history. Dry-run/simulated orders never carry a fill, so
+    they fall out naturally.
+    """
+    stmt = (
+        select(RoboOrder)
+        .where(RoboOrder.placed.is_(True))
+        .where(RoboOrder.simulated.is_(False))
+        .where(RoboOrder.fill_price.is_not(None))
+        .where(RoboOrder.fill_quantity.is_not(None))
+        .order_by(RoboOrder.created_at.asc())
+    )
+    return list(session.scalars(stmt))
+
+
 def get_unfilled_placed_orders(
     session: Session, limit: int | None = None, *, batch_size: int = 100
 ) -> list[RoboOrder]:

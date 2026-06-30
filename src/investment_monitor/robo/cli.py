@@ -33,6 +33,7 @@ from investment_monitor.robo.notify import (
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
     accuracy_stats_for_symbol,
+    get_filled_robo_orders,
     get_outcome_symbols,
     get_recent_robo_runs,
     get_robo_orders_for_run,
@@ -506,18 +507,22 @@ def pnl(
     else:
         typer.echo("Unrealized P&L: n/a (broker reported no cost basis)")
 
-    # Realized P&L, reconstructed from the broker's executed-trade history.
+    # Realized P&L, reconstructed from the bot's OWN filled orders (not the shared
+    # account's history) so manual/pre-existing positions never count as robo gains.
     realized_total = None
     try:
-        from investment_monitor.robo.pnl import realized_pnl
-        rp = realized_pnl(broker.get_transactions())
+        from investment_monitor.robo.pnl import realized_pnl, trades_from_fills
+
+        init_db(settings.db_path)
+        with get_session() as session:
+            rp = realized_pnl(trades_from_fills(get_filled_robo_orders(session)))
         realized_total = rp.total_realized
         realized_syms = {s: sp for s, sp in rp.per_symbol.items() if sp.realized != 0}
         if realized_syms:
-            typer.echo("\nRealized P&L (from trade history):")
+            typer.echo("\nRealized P&L (robo trades only):")
             for sym, sp in sorted(realized_syms.items()):
                 typer.echo(f"  {sym:<6} ${sp.realized:+.2f}")
-        typer.echo(f"Realized P&L:   ${realized_total:+.2f}  (fees ${rp.total_fees:.2f})")
+        typer.echo(f"Realized P&L:   ${realized_total:+.2f}")
     except Exception as exc:  # noqa: BLE001 - reporting only; never fail the command
         typer.secho(f"Realized P&L:   unavailable ({exc})", fg=typer.colors.YELLOW)
 
@@ -553,9 +558,11 @@ def daily_summary(
 
     realized = None
     try:
-        from investment_monitor.robo.pnl import realized_pnl
+        from investment_monitor.robo.pnl import realized_pnl, trades_from_fills
 
-        realized = realized_pnl(broker.get_transactions())
+        init_db(settings.db_path)
+        with get_session() as session:
+            realized = realized_pnl(trades_from_fills(get_filled_robo_orders(session)))
     except Exception as exc:  # noqa: BLE001 - realized P&L is best-effort, never required
         typer.secho(f"(realized P&L unavailable: {exc})", fg=typer.colors.YELLOW)
 

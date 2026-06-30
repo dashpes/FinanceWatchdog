@@ -11,8 +11,10 @@ unit-testable and deterministic.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -44,6 +46,54 @@ class RealizedPnL(BaseModel):
         """Realized P&L for ``symbol`` (0 if it has no trade history)."""
         sp = self.per_symbol.get(symbol.upper())
         return sp.realized if sp else Decimal("0")
+
+
+def _fill_to_decimal(value: Any) -> Decimal | None:
+    """Coerce a stored fill field (float/str/None) to Decimal, or None if unusable."""
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (ValueError, ArithmeticError, TypeError):
+        return None
+
+
+def trades_from_fills(orders: Iterable[Any]) -> list[Trade]:
+    """Build the bot's OWN executed-trade ledger from its filled order records.
+
+    Realized P&L must reflect only trades the robo itself initiated — never the
+    account's pre-existing or manually-entered positions, which share the one
+    brokerage account and would otherwise leak in through the account-wide trade
+    history (e.g. a personal ETF sale showing up as robo "realized" gains).
+
+    Each input is one of the robo's order rows (duck-typed: ``symbol``, ``side``,
+    ``fill_price``, ``fill_quantity``, ``created_at``) carrying the broker-reconciled
+    fill. ``gross`` is ``fill_price * fill_quantity``; ``created_at`` orders the
+    average-cost reconstruction. Rows without a usable fill (never filled, or
+    rejected/cancelled before filling) are skipped. Per-order fees are not stored,
+    so realized P&L here is gross of the (sub-cent) per-trade commission.
+    """
+    out: list[Trade] = []
+    for o in orders:
+        price = _fill_to_decimal(getattr(o, "fill_price", None))
+        qty = _fill_to_decimal(getattr(o, "fill_quantity", None))
+        if price is None or qty is None or qty == 0:
+            continue
+        symbol = str(getattr(o, "symbol", "")).upper()
+        side_raw = str(getattr(o, "side", "")).upper()
+        if not symbol or side_raw not in ("BUY", "SELL"):
+            continue
+        out.append(
+            Trade(
+                symbol=symbol,
+                side=OrderSide.BUY if side_raw == "BUY" else OrderSide.SELL,
+                quantity=abs(qty),
+                gross=abs(price * qty),
+                fees=Decimal("0"),
+                timestamp=getattr(o, "created_at", None),
+            )
+        )
+    return out
 
 
 def realized_pnl(trades: list[Trade]) -> RealizedPnL:
