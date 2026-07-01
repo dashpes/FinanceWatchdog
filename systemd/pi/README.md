@@ -12,6 +12,22 @@ units below, and runs the `investment-robo init` credential wizard (trading stay
 **dry-run** until you flip `ROBO_FORCE_DRY_RUN=false` in `.env` **and** `dry_run: false`
 in `config/robo.yaml`).
 
+### Private repo / you place the code yourself
+
+If the repo is private (or you'd rather `git clone`/`scp` it over SSH), put it at
+`/opt/financewatchdog` first and tell the installer not to clone:
+
+```bash
+sudo git clone git@github.com:dashpes/FinanceWatchdog.git /opt/financewatchdog   # or scp it there
+sudo FW_NO_CLONE=1 FW_USER=$USER bash /opt/financewatchdog/scripts/install.sh
+```
+
+The installer never needs its own GitHub credentials this way. Set `FW_USER` to a user that
+can pull the repo if you want git **auto-update** to keep working (the default isolated
+`financewatchdog` account has no keys, so the installer leaves the auto-update timer off and
+you update by re-copying the code and re-running the installer). A plain `scp`'d copy (no
+`.git`) always updates that way.
+
 ## The bundle
 
 These files are templates — the installer substitutes `@FW_USER@` / `@FW_HOME@` and

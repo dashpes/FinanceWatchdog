@@ -18,6 +18,13 @@
 # Override any of these before running:
 #   FW_HOME=/opt/financewatchdog  FW_USER=financewatchdog  FW_TZ=America/Los_Angeles
 #   FW_REPO=https://github.com/dashpes/FinanceWatchdog.git  FW_REF=<tag/branch>  FW_SKIP_INIT=1
+#   FW_NO_CLONE=1   # you already placed the code at FW_HOME (git clone or scp) — don't clone
+#
+# PRIVATE REPO / managing the code yourself: clone or scp the repo to FW_HOME first, then run
+# with FW_NO_CLONE=1 (the installer never needs its own repo credentials). For git auto-update
+# to keep working afterward, run as a user that can pull — i.e. FW_USER=<your user> — since the
+# default 'financewatchdog' service account has no SSH key. If it can't fetch, the installer
+# leaves auto-update off and you update by re-copying the code and re-running this script.
 set -euo pipefail
 
 FW_HOME="${FW_HOME:-/opt/financewatchdog}"
@@ -77,25 +84,48 @@ for m in $FW_MODELS; do
   ollama pull "$m" || warn "could not pull $m (you can pull it later)"
 done
 
-say "Fetching the app into $FW_HOME"
-if [ -d "$FW_HOME/.git" ]; then
-  sudo -u "$FW_USER" git -C "$FW_HOME" fetch --tags --prune origin
+say "Placing the app in $FW_HOME"
+# MANAGED=1 means the installer owns the git checkout (it can fetch + pin a release tag).
+# HAS_GIT=1 means a .git exists at all. Neither requires the installer to have repo creds
+# in the FW_NO_CLONE / existing-checkout paths.
+HAS_GIT=0; MANAGED=0
+if [ "${FW_NO_CLONE:-0}" = 1 ]; then
+  [ -f "$FW_HOME/pyproject.toml" ] || die "FW_NO_CLONE=1 but no checkout at $FW_HOME (expected pyproject.toml). Clone or scp the repo there first."
+  [ -d "$FW_HOME/.git" ] && HAS_GIT=1
+  say "Using your existing checkout at $FW_HOME (installer will not touch the code)"
+elif [ -d "$FW_HOME/.git" ]; then
+  HAS_GIT=1
+  say "Found a git checkout in $FW_HOME"
+  if sudo -u "$FW_USER" git -C "$FW_HOME" fetch --tags --prune origin >/dev/null 2>&1; then
+    MANAGED=1
+  else
+    warn "could not fetch as '$FW_USER' (no repo access for that user) — using the checkout as-is"
+  fi
+elif [ -f "$FW_HOME/pyproject.toml" ]; then
+  say "Using your existing (non-git) checkout at $FW_HOME — auto-update disabled (update by re-copying)"
 else
-  # /opt/financewatchdog exists (service-user home) but is empty; clone into it.
+  say "Cloning $FW_REPO into $FW_HOME"
   sudo -u "$FW_USER" git clone "$FW_REPO" "$FW_HOME"
+  HAS_GIT=1; MANAGED=1
 fi
-# Resolve the ref: explicit FW_REF, else the latest semver tag, else the default branch.
-if [ -z "$FW_REF" ]; then
-  # Strict semver only — never auto-select a pre-release tag (v2.0.0-rc1) as "latest".
-  FW_REF="$(sudo -u "$FW_USER" git -C "$FW_HOME" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+
+# Only when the installer owns the checkout: pin it to the release ref (else respect what
+# you placed). Explicit FW_REF, else the latest strict-semver tag, else the default branch.
+if [ "$MANAGED" = 1 ]; then
+  if [ -z "$FW_REF" ]; then
+    FW_REF="$(sudo -u "$FW_USER" git -C "$FW_HOME" tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+  fi
+  if [ -z "$FW_REF" ]; then
+    FW_REF="$(sudo -u "$FW_USER" git -C "$FW_HOME" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#origin/##')"
+    FW_REF="${FW_REF:-main}"
+    warn "no release tag found — installing the '$FW_REF' branch"
+  fi
+  say "Checking out $FW_REF"
+  sudo -u "$FW_USER" git -C "$FW_HOME" checkout -q "$FW_REF"
 fi
-if [ -z "$FW_REF" ]; then
-  FW_REF="$(sudo -u "$FW_USER" git -C "$FW_HOME" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#origin/##')"
-  FW_REF="${FW_REF:-main}"
-  warn "no release tag found — installing the '$FW_REF' branch"
-fi
-say "Checking out $FW_REF"
-sudo -u "$FW_USER" git -C "$FW_HOME" checkout -q "$FW_REF"
+
+# The runtime user must own the tree (venv/.env/data/logs writes; git-as-owner for updates).
+chown -R "$FW_USER:$FW_USER" "$FW_HOME"
 
 say "Building the virtualenv"
 if [ ! -d "$FW_HOME/.venv" ]; then
@@ -141,9 +171,15 @@ fi
 
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
-for t in trade summary prune autoupdate; do
+for t in trade summary prune; do
   "$SYSTEMCTL" enable --now "financewatchdog-$t.timer" 2>/dev/null || true
 done
+# Auto-update only makes sense if the runtime user can actually pull the repo.
+if [ "$MANAGED" = 1 ]; then
+  "$SYSTEMCTL" enable --now financewatchdog-autoupdate.timer 2>/dev/null || true
+else
+  warn "auto-update timer NOT enabled ('$FW_USER' can't fetch the repo). Update by re-copying the code + re-running this script, or reinstall with FW_USER set to a user that can pull."
+fi
 
 say "Done — FinanceWatchdog is installed at $FW_HOME (ref: $FW_REF)"
 echo "Trading stays in DRY-RUN until you set ROBO_FORCE_DRY_RUN=false in $FW_HOME/.env"

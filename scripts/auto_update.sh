@@ -29,7 +29,9 @@ cd "$PROJECT_DIR"
 log "Auto-update check (tagged-release channel)…"
 
 if ! git fetch --tags --prune origin 2>&1 | tee -a "$LOG_FILE"; then
-  log "ERROR: git fetch failed"; exit 1
+  # No repo access (e.g. a private repo the service user can't reach) is not fatal — the
+  # box keeps running its current code; the operator updates by re-copying + reinstalling.
+  log "WARN: git fetch failed (no repo access?); skipping this update"; exit 0
 fi
 
 # Target = newest STRICT-semver tag (pre-releases like v2.0.0-rc1 are excluded so an rc
