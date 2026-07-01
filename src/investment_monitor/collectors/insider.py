@@ -52,10 +52,19 @@ class InsiderCollector(BaseCollector):
     SEC_CIK_LOOKUP_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
     SEC_BASE_URL = "https://www.sec.gov"
 
-    # User-Agent required by SEC - they block requests without a proper UA.
-    # SEC asks for a real contact; broad ingestion makes many requests, so include one.
-    USER_AGENT = "FinanceWatchdog/1.0 (daniel.ashpes@gmail.com)"
     EDGAR_ARCHIVES = "https://www.sec.gov/Archives"
+
+    @property
+    def USER_AGENT(self) -> str:
+        """SEC-required contact User-Agent, built from the configured contact email.
+
+        SEC blocks/rate-limits requests without a real contact, and broad ingestion
+        makes many requests. The contact comes from ``settings.sec_contact_email``
+        (set at onboarding); a blank config falls back to a generic contact so a
+        fresh install still works, but each operator should set their own email.
+        """
+        contact = (self.config.sec_contact_email or "").strip() or "contact@financewatchdog.app"
+        return f"FinanceWatchdog/1.0 ({contact})"
 
     async def collect(self, tickers: list[str]) -> CollectorResult:
         """

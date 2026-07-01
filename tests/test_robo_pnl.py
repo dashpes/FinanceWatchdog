@@ -11,7 +11,7 @@ from decimal import Decimal
 
 from investment_monitor.robo.broker import trades_from_raw
 from investment_monitor.robo.models import OrderSide, Trade
-from investment_monitor.robo.pnl import realized_pnl
+from investment_monitor.robo.pnl import realized_pnl, trades_from_fills
 
 
 def _t(symbol, side, quantity, gross, fees="0", timestamp=None):
@@ -173,7 +173,8 @@ def test_trades_from_raw_keeps_trades_only():
 
 def test_trades_from_raw_camelcase_and_skips_incomplete():
     raw = [
-        {"type": "TRADE", "side": "SELL", "symbol": "MSFT", "quantity": "1", "principalAmount": "400"},
+        # A real Public SELL: quantity is NEGATIVE, principal POSITIVE (cash in).
+        {"type": "TRADE", "side": "SELL", "symbol": "MSFT", "quantity": "-1", "principalAmount": "400"},
         {"type": "TRADE", "side": "BUY", "symbol": "", "quantity": "1", "principalAmount": "100"},  # no symbol
         {"type": "TRADE", "side": "BUY", "symbol": "AAPL", "principalAmount": "100"},  # no qty
     ]
@@ -181,6 +182,79 @@ def test_trades_from_raw_camelcase_and_skips_incomplete():
     assert len(trades) == 1 and trades[0].symbol == "MSFT" and trades[0].side is OrderSide.SELL
 
 
+def test_trades_from_raw_keeps_negative_quantity_sells():
+    # Regression: Public reports SELL quantity as negative and BUY principal as
+    # negative (it signs by cash flow, not magnitude). A ``qty <= 0`` guard dropped
+    # every sell, so realized P&L was permanently $0 on a live account that had
+    # actually sold. The side carries the direction; magnitudes must be abs'd.
+    raw = [
+        {"type": "TRADE", "side": "BUY", "symbol": "BORR", "quantity": "1.54332",
+         "principal_amount": "-6.5899764", "fees": "0", "timestamp": "2026-06-23T14:02:18Z"},
+        {"type": "TRADE", "side": "SELL", "symbol": "BORR", "quantity": "-1.15164",
+         "principal_amount": "5.009979492", "fees": "0.02", "timestamp": "2026-06-26T14:02:45Z"},
+    ]
+    trades = trades_from_raw(raw)
+    assert [t.side for t in trades] == [OrderSide.BUY, OrderSide.SELL]
+    sell = trades[1]
+    assert sell.quantity == Decimal("1.15164")  # abs'd to a positive magnitude
+    assert sell.gross == Decimal("5.009979492")
+    assert sell.fees == Decimal("0.02")
+    # End-to-end: the sell now realizes P&L instead of being silently dropped.
+    rp = realized_pnl(trades)
+    assert rp.symbol_realized("BORR") != Decimal("0")
+
+
 def test_trades_from_raw_handles_empty():
     assert trades_from_raw(None) == []
     assert trades_from_raw([]) == []
+
+
+# --------------------------------------------------------------------------- #
+# Own-ledger attribution: realized P&L from the bot's OWN filled orders
+# --------------------------------------------------------------------------- #
+class _FilledOrder:
+    """Minimal stand-in for a RoboOrder row carrying a broker-reconciled fill."""
+
+    def __init__(self, symbol, side, fill_price, fill_quantity, created_at=None):
+        self.symbol = symbol
+        self.side = side
+        self.fill_price = fill_price
+        self.fill_quantity = fill_quantity
+        self.created_at = created_at
+
+
+def test_trades_from_fills_maps_side_and_computes_gross():
+    orders = [
+        _FilledOrder("AAPL", "buy", 298.26, 0.01274),
+        _FilledOrder("AAPL", "sell", 294.855, 0.00932),
+    ]
+    buy, sell = trades_from_fills(orders)
+    assert buy.side is OrderSide.BUY and sell.side is OrderSide.SELL
+    assert buy.symbol == "AAPL" and buy.quantity == Decimal("0.01274")
+    assert buy.gross == Decimal("298.26") * Decimal("0.01274")  # gross = fill_price * qty
+    assert sell.gross == Decimal("294.855") * Decimal("0.00932")
+    assert buy.fees == Decimal("0") and sell.fees == Decimal("0")  # fees not stored per order
+
+
+def test_trades_from_fills_skips_rows_without_a_usable_fill():
+    orders = [
+        _FilledOrder("MSFT", "buy", None, None),    # never filled
+        _FilledOrder("MSFT", "buy", 375.0, None),   # half-missing
+        _FilledOrder("MSFT", "buy", 375.0, 0.0),    # zero quantity
+        _FilledOrder("", "buy", 375.0, 0.01),       # no symbol
+        _FilledOrder("MSFT", "buy", 375.0, 0.01),   # the one valid row
+    ]
+    trades = trades_from_fills(orders)
+    assert len(trades) == 1 and trades[0].symbol == "MSFT"
+
+
+def test_trades_from_fills_realized_only_sees_bot_symbols():
+    # The ledger holds ONLY the bot's own orders, so a manual holding the bot never
+    # traded (e.g. MSTY) is simply absent and contributes nothing to realized P&L.
+    orders = [
+        _FilledOrder("BORR", "buy", 4.2683, 1.54332, datetime(2026, 6, 23)),
+        _FilledOrder("BORR", "sell", 4.3503, 1.15164, datetime(2026, 6, 26)),
+    ]
+    rp = realized_pnl(trades_from_fills(orders))
+    assert "MSTY" not in rp.per_symbol
+    assert rp.symbol_realized("BORR") != Decimal("0")

@@ -9,6 +9,7 @@ from investment_monitor.robo.broker import fill_from_order_raw
 from investment_monitor.robo.rebalance import _apply_fill, _reconcile_order_fills
 from investment_monitor.storage import (
     RoboOrder,
+    get_filled_robo_orders,
     get_robo_orders_for_run,
     get_session,
     get_unfilled_placed_orders,
@@ -226,6 +227,35 @@ def test_reconcile_order_fills_backfills(tmp_path):
         assert get_unfilled_placed_orders(s) == []  # resolved
         o = get_robo_orders_for_run(s, "r1")[0]
         assert o.fill_price == 500.25 and o.fill_status == "FILLED"
+
+
+def test_get_filled_robo_orders_returns_only_the_bots_filled_trades(tmp_path):
+    # Realized-P&L attribution: only the robo's OWN real, filled orders form the
+    # ledger — oldest-first. Simulated paper orders and not-yet-reconciled live
+    # orders are excluded so the account's manual/pending activity never counts.
+    init_db(tmp_path / "t.db")
+    base = datetime(2026, 6, 23, tzinfo=timezone.utc)
+    with get_session() as s:
+        buy = _placed_order(symbol="BORR", oid="b1")
+        buy.side, buy.fill_price, buy.fill_quantity = "buy", 4.2683, 1.54332
+        buy.fill_status, buy.created_at = "FILLED", base
+        save_robo_order(s, buy)
+
+        sell = _placed_order(symbol="BORR", oid="s1")
+        sell.side, sell.fill_price, sell.fill_quantity = "sell", 4.3503, 1.15164
+        sell.fill_status, sell.created_at = "FILLED", base + timedelta(days=3)
+        save_robo_order(s, sell)
+
+        sim = _placed_order(symbol="AAPL", oid=None)  # paper order with a (fake) fill
+        sim.placed, sim.simulated = False, True
+        sim.fill_price, sim.fill_quantity, sim.fill_status = 100.0, 1.0, "FILLED"
+        save_robo_order(s, sim)
+
+        save_robo_order(s, _placed_order(symbol="MSFT", oid="p1"))  # live, unfilled yet
+
+    with get_session() as s:
+        rows = get_filled_robo_orders(s)
+        assert [(r.symbol, r.side) for r in rows] == [("BORR", "buy"), ("BORR", "sell")]
 
 
 def test_reconcile_order_fills_is_fail_open(tmp_path):

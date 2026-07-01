@@ -1,0 +1,11 @@
+[Unit]
+Description=FinanceWatchdog robo — daily summary schedule (13:15, Mon-Fri, local time)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Local time (Pi TZ = America/Los_Angeles) — ~15m after the US close.
+OnCalendar=Mon-Fri 13:15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

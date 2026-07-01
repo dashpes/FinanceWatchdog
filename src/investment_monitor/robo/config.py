@@ -209,6 +209,26 @@ class SizingConfig(BaseModel):
     # reset whenever a thesis is re-evaluated. Prevents stale max-conviction.
     conviction_half_life_days: float = Field(default=30.0, gt=0)
     conviction_floor: float = Field(default=0.5, ge=0, le=1.0)
+    # Anti-churn: EWMA-smooth conviction over its recent re-eval history (half-life in
+    # points) BEFORE sizing, so a one-off intraday LLM wobble (e.g. an overnight 0.7->0.4
+    # that reverts) barely moves the target while a SUSTAINED move is still followed. A
+    # broken/invalidated thesis (conviction 0) is never smoothed back up, so exits stay
+    # prompt. 0 disables smoothing (raw latest conviction).
+    conviction_smoothing_halflife: float = Field(default=3.0, ge=0)
+    # Anti-averaging-up: block a BUY that ADDS to an existing position if it would raise
+    # the cost basis (buy price above avg cost beyond the tolerance) UNLESS the thesis has
+    # strengthened — conviction now >= entry + `add_strengthen_margin`, or already >=
+    # `strong_add_conviction`. Averaging DOWN and opening NEW positions are always allowed.
+    block_average_up: bool = Field(default=True)
+    average_up_tolerance: float = Field(default=0.03, ge=0)      # buying up to 3% over cost is fine
+    add_strengthen_margin: float = Field(default=0.15, ge=0, le=1.0)
+    strong_add_conviction: float = Field(default=0.7, ge=0, le=1.0)
+    # Concentration: hold FEWER, STRONGER names. A thesis below this (effective) conviction
+    # gets NO capital — capital isn't spread across every marginal idea. Combined with the
+    # gate's caps.max_positions (also applied at sizing, keeping the top-N by size) and the
+    # per-name max_position_weight cap, this yields a handful of meaningful positions with a
+    # bounded top, and the rest in cash / the cash ETF. 0 keeps every positive-weight name.
+    min_conviction_to_hold: float = Field(default=0.35, ge=0, le=1.0)
     # Always leave at least this fraction of the portfolio in cash (autonomous mode).
     min_cash_weight: float = Field(
         default=0.05, ge=0, lt=1.0,
@@ -270,10 +290,12 @@ class LearningConfig(BaseModel):
     min_days_held: int = Field(default=2, ge=0)
     # Strength of the tilt: multiplier = 1 + accuracy_weight*(hit_rate-0.5)*2, clamped.
     accuracy_weight: float = Field(default=0.5, ge=0.0, le=1.0)
-    # Multiplier clamp band. Ceiling 1.0 = SHRINK-ONLY (dampen poor names, never
-    # amplify on a thin track record); raise above 1.0 to also reward reliable ones.
+    # Multiplier clamp band. Symmetric by default (0.5..1.5): a consistently WRONG name
+    # gets sized down to 0.5x and a consistently RIGHT one up to 1.5x — so the loop both
+    # cuts losers AND rewards proven winners (add more when the track record justifies).
+    # Set ceiling to 1.0 for the old shrink-only behaviour.
     modifier_floor: float = Field(default=0.5, gt=0.0, le=1.0)
-    modifier_ceiling: float = Field(default=1.0, ge=1.0)
+    modifier_ceiling: float = Field(default=1.5, ge=1.0)
     # Recency: hit-rate half-life in events, and how many recent events to aggregate.
     ewma_halflife: float = Field(default=10.0, gt=0)
     recent_window: int = Field(default=20, ge=1)
@@ -311,6 +333,11 @@ class RoboConfig(BaseModel):
     # the system also auto-learns broker-refused, un-buyable names into a separate
     # persisted learned blocklist (see robo/blocklist.py). Union of both is enforced.
     blocklist: list[str] = Field(default_factory=list)
+    # Cash sleeve: when set (e.g. "SGOV"/"BIL"), the intended cash weight (above the raw
+    # min_cash_weight buffer) is parked in this short-term Treasury ETF instead of sitting
+    # idle — so uninvested capital earns ~T-bill yield while staying liquid to fund buys.
+    # Blank = hold raw cash (original behaviour). Autonomous mode only.
+    cash_etf: str = ""
 
     caps: RoboCaps = Field(default_factory=RoboCaps)
 

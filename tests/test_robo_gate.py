@@ -90,6 +90,37 @@ def sell(symbol="VOO", *, quantity=None, notional=None):
 PRICE = {"VOO": Decimal("500"), "SCHD": Decimal("80")}
 
 
+def test_sell_exceeding_max_order_pct_is_allowed():
+    # A full-exit SELL that exceeds max_order_pct must NOT be blocked — a broken thesis
+    # has to be fully exitable. VOO 0.1sh @ $500 = $50; cap = 25% of $150 total = $37.50.
+    d = validate(sell(quantity="0.1"), make_account(), make_config(), price=PRICE["VOO"])
+    assert d.accepted, d.reason
+
+
+def test_buy_still_capped_by_max_order_pct():
+    # The size cap still applies to BUYS ($50 buy vs $37.50 cap on the default account).
+    d = validate(buy(notional="50"), make_account(), make_config(), price=PRICE["VOO"])
+    assert not d.accepted and d.code == "exceeds_max_order_pct"
+
+
+def test_cash_etf_exempt_from_position_cap():
+    # At the position cap, a new real name is blocked but the cash ETF (a cash equivalent)
+    # is not — parking cash must never crowd out or be crowded out by a real holding.
+    positions = [Position(symbol=s, quantity=Decimal("0.1"), price=Decimal("100")) for s in ("AAA", "BBB")]
+    acct = make_account(settled_cash="1000", positions=positions)
+    base = make_config(allowlist=["AAA", "BBB", "NEW", "SGOV"], max_order_pct=0.9)
+    cfg = base.model_copy(update={
+        "cash_etf": "SGOV",
+        "caps": base.caps.model_copy(update={"max_positions": 2}),
+    })
+    # A new real name at the cap -> rejected.
+    d_real = validate(buy("NEW", notional="10"), acct, cfg, price=Decimal("100"))
+    assert not d_real.accepted and d_real.code == "max_positions"
+    # The cash ETF -> allowed despite being at the cap.
+    d_etf = validate(buy("SGOV", notional="10"), acct, cfg, price=Decimal("100"))
+    assert d_etf.accepted, d_etf.reason
+
+
 # --------------------------------------------------------------------------- #
 # Acceptance
 # --------------------------------------------------------------------------- #

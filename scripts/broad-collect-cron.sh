@@ -9,7 +9,8 @@
 # Usage:  broad-collect-cron.sh [--days-back N]
 set -uo pipefail
 
-PROJ="/Users/danielashpes/Developer/FinanceWatchdog"
+# Project root: explicit FW_HOME wins, else derive from this script's dir (…/scripts/..).
+PROJ="${FW_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$PROJ" || { echo "broad-collect-cron: cannot cd to $PROJ" >&2; exit 1; }
 mkdir -p "$PROJ/logs"
 export PYTHONPATH="$PROJ/src"

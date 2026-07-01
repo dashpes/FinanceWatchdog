@@ -1,0 +1,14 @@
+[Unit]
+Description=FinanceWatchdog robo — weekly data-retention prune (keeps the SQLite DB bounded)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Service]
+Type=oneshot
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Routed through robo-cron.sh so it shares the single-run lock — it never prunes the
+# DB while a research cycle or trade is writing. Scheduled Sunday noon (research loop
+# idle, market closed) so the lock is free.
+ExecStart=@FW_HOME@/scripts/robo-cron.sh prune

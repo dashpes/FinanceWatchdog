@@ -1,0 +1,15 @@
+[Unit]
+Description=FinanceWatchdog robo — auto-update from tagged releases
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Pulls the latest STABLE git tag (not raw main), reinstalls from the lockfile, and
+# restarts the robo units via a scoped sudoers entry (see scripts/install.sh).
+ExecStart=@FW_HOME@/scripts/auto_update.sh --restart

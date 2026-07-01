@@ -13,6 +13,7 @@ is explicitly enabled AND the env kill-switch is off). `status` shows recent run
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,10 +30,12 @@ from investment_monitor.robo.notify import (
     notify_run,
     send_daily_summary,
     send_test,
+    todays_trade_lines,
 )
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
     accuracy_stats_for_symbol,
+    get_filled_robo_orders,
     get_outcome_symbols,
     get_recent_robo_runs,
     get_robo_orders_for_run,
@@ -506,18 +509,22 @@ def pnl(
     else:
         typer.echo("Unrealized P&L: n/a (broker reported no cost basis)")
 
-    # Realized P&L, reconstructed from the broker's executed-trade history.
+    # Realized P&L, reconstructed from the bot's OWN filled orders (not the shared
+    # account's history) so manual/pre-existing positions never count as robo gains.
     realized_total = None
     try:
-        from investment_monitor.robo.pnl import realized_pnl
-        rp = realized_pnl(broker.get_transactions())
+        from investment_monitor.robo.pnl import realized_pnl, trades_from_fills
+
+        init_db(settings.db_path)
+        with get_session() as session:
+            rp = realized_pnl(trades_from_fills(get_filled_robo_orders(session)))
         realized_total = rp.total_realized
         realized_syms = {s: sp for s, sp in rp.per_symbol.items() if sp.realized != 0}
         if realized_syms:
-            typer.echo("\nRealized P&L (from trade history):")
+            typer.echo("\nRealized P&L (robo trades only):")
             for sym, sp in sorted(realized_syms.items()):
                 typer.echo(f"  {sym:<6} ${sp.realized:+.2f}")
-        typer.echo(f"Realized P&L:   ${realized_total:+.2f}  (fees ${rp.total_fees:.2f})")
+        typer.echo(f"Realized P&L:   ${realized_total:+.2f}")
     except Exception as exc:  # noqa: BLE001 - reporting only; never fail the command
         typer.secho(f"Realized P&L:   unavailable ({exc})", fg=typer.colors.YELLOW)
 
@@ -553,14 +560,17 @@ def daily_summary(
 
     realized = None
     try:
-        from investment_monitor.robo.pnl import realized_pnl
+        from investment_monitor.robo.pnl import realized_pnl, trades_from_fills
 
-        realized = realized_pnl(broker.get_transactions())
+        init_db(settings.db_path)
+        with get_session() as session:
+            realized = realized_pnl(trades_from_fills(get_filled_robo_orders(session)))
     except Exception as exc:  # noqa: BLE001 - realized P&L is best-effort, never required
         typer.secho(f"(realized P&L unavailable: {exc})", fg=typer.colors.YELLOW)
 
-    typer.echo(format_daily_summary(account, realized))
-    sent = send_daily_summary(settings, account, realized)
+    trades = todays_trade_lines(settings)
+    typer.echo(format_daily_summary(account, realized, trades))
+    sent = send_daily_summary(settings, account, realized, trades)
     if notifications_configured(settings) and not sent:
         typer.secho(
             "(summary not sent — check notification config / logs)",
@@ -621,6 +631,148 @@ def learning(
                 f"{sym:<8} {st['n']:>4} {st['hit_rate'] * 100:>5.0f}% "
                 f"{st['ewma_hit_rate'] * 100:>5.0f}% {1.0 - st['brier']:>6.2f}"
             )
+
+
+@app.command("prune")
+def prune() -> None:
+    """Prune old market data to keep the SQLite DB bounded (weekly on the Pi).
+
+    Applies the RETENTION_* windows from settings to the broad, market-wide tables
+    (insider / news / prices / confluence findings) and VACUUMs to reclaim space. A
+    window of 0 keeps everything for that source. Read-mostly and safe to run anytime;
+    routed through the shared run-lock by systemd so it never prunes mid-trade.
+    """
+    from investment_monitor.storage.retention import RetentionConfig, prune_old_data
+
+    settings = get_settings()
+    init_db(settings.db_path)
+    cfg = RetentionConfig(
+        insider_days=settings.retention_insider_days,
+        news_days=settings.retention_news_days,
+        price_days=settings.retention_price_days,
+        findings_days=settings.retention_findings_days,
+    )
+    if not cfg.any_enabled():
+        typer.echo("Retention disabled (all windows 0) — nothing to prune.")
+        return
+    with get_session() as session:
+        deleted = prune_old_data(session, cfg)
+    for table, n in sorted(deleted.items()):
+        typer.echo(f"  {table:<22} {n:>8,} rows pruned")
+    typer.echo(f"Prune complete ({sum(deleted.values()):,} rows removed).")
+
+
+@app.command("init")
+def init(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="Scaffold files with defaults; ask nothing"
+    ),
+) -> None:
+    """Onboarding wizard: write .env (0600) + config/robo.yaml, dry-run forced ON.
+
+    Safe to re-run — existing values become the defaults. This NEVER arms live
+    trading: it forces ROBO_FORCE_DRY_RUN=true and robo.yaml dry_run:true. Flip both
+    only after reviewing a dry-run cycle (see the printed go-live checklist).
+    """
+    from investment_monitor.robo.onboarding import parse_env, set_yaml_scalar, upsert_env
+
+    # Anchor .env to $FW_HOME when set (the installer and systemd units run the app from
+    # there, and that is where pydantic reads .env at runtime), else the current dir.
+    # Without this, a `sudo -u` install would write .env to the caller's CWD (e.g. /root)
+    # where the services never read it.
+    root = Path(os.environ["FW_HOME"]) if os.environ.get("FW_HOME") else Path.cwd()
+    env_path = root / ".env"
+    env_example = root / ".env.example"
+    cfg_dir = Path(config) if config else get_settings().config_dir
+    yaml_path = cfg_dir / "robo.yaml"
+    yaml_example = cfg_dir / "robo.yaml.example"
+
+    # 1) Seed .env from the example if it doesn't exist yet (owner-only from birth).
+    if not env_path.exists():
+        env_path.write_text(env_example.read_text() if env_example.exists() else "")
+        os.chmod(env_path, 0o600)
+    existing = parse_env(env_path.read_text())
+
+    def ask(key: str, prompt: str, *, secret: bool = False, required: bool = False) -> str:
+        cur = existing.get(key, "")
+        if non_interactive:
+            return cur
+        shown = "********" if (secret and cur) else cur
+        val = typer.prompt(prompt, default=shown, show_default=bool(shown))
+        if secret and val == "********":  # kept the masked existing secret
+            return cur
+        val = val.strip()
+        if required and not val:
+            typer.secho(f"{key} is required to run the robo advisor.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        return val
+
+    updates: dict[str, str] = {}
+    updates["PUBLIC_API_TOKEN"] = ask(
+        "PUBLIC_API_TOKEN", "Public.com API token", secret=True, required=not non_interactive
+    )
+    updates["SEC_CONTACT_EMAIL"] = ask("SEC_CONTACT_EMAIL", "Your email (SEC EDGAR contact)")
+    updates["SMTP_HOST"] = ask("SMTP_HOST", "SMTP host for email (blank = no email)")
+    if updates["SMTP_HOST"]:
+        updates["SMTP_PORT"] = ask("SMTP_PORT", "SMTP port") or "587"
+        updates["SMTP_USERNAME"] = ask("SMTP_USERNAME", "SMTP username")
+        updates["SMTP_PASSWORD"] = ask("SMTP_PASSWORD", "SMTP / app password", secret=True)
+        updates["EMAIL_FROM"] = ask("EMAIL_FROM", "From address") or updates["SMTP_USERNAME"]
+        updates["EMAIL_TO"] = ask("EMAIL_TO", "Send summaries/alerts to")
+    updates["ANTHROPIC_API_KEY"] = ask(
+        "ANTHROPIC_API_KEY", "Anthropic API key (optional; blank = local models only)", secret=True
+    )
+    updates["ROBO_FORCE_DRY_RUN"] = "true"  # safety: never arm live trading at init.
+
+    env_path.write_text(upsert_env(env_path.read_text(), updates))
+    os.chmod(env_path, 0o600)
+    typer.secho(f"Wrote {env_path} (permissions 0600).", fg=typer.colors.GREEN)
+
+    # 2) Seed robo.yaml from the example and force dry_run on.
+    if not yaml_path.exists():
+        yaml_path.parent.mkdir(parents=True, exist_ok=True)
+        yaml_path.write_text(
+            yaml_example.read_text()
+            if yaml_example.exists()
+            else 'mode: advisory\ndry_run: true\naccount_id: ""\n'
+        )
+    ytext = set_yaml_scalar(yaml_path.read_text(), "dry_run", "true")
+
+    # 3) Discover the CASH account with the just-entered token (best-effort).
+    if updates.get("PUBLIC_API_TOKEN"):
+        try:
+            broker = PublicBroker(
+                api_token=updates["PUBLIC_API_TOKEN"],
+                base_url=existing.get("PUBLIC_API_BASE_URL", ""),
+                dry_run=True,
+            )
+            cash = [a for a in broker.list_accounts() if a.get("is_cash")]
+            if cash:
+                ytext = set_yaml_scalar(ytext, "account_id", f'"{cash[0]["account_id"]}"')
+                typer.secho(f"Configured CASH account {cash[0]['account_id']}.", fg=typer.colors.GREEN)
+            else:
+                typer.secho(
+                    "No CASH account found — set account_id manually; the robo requires one.",
+                    fg=typer.colors.YELLOW,
+                )
+        except Exception as exc:  # noqa: BLE001 - discovery is best-effort at onboarding.
+            typer.secho(
+                f"Couldn't list accounts ({exc}). Set account_id later via `investment-robo accounts`.",
+                fg=typer.colors.YELLOW,
+            )
+    yaml_path.write_text(ytext)
+    typer.secho(f"Wrote {yaml_path} (dry_run: true).", fg=typer.colors.GREEN)
+
+    typer.echo(
+        "\nNext:\n"
+        "  1. Pull the models:  ollama pull phi3:mini nomic-embed-text qwen2.5:14b\n"
+        "  2. Verify email:     investment-robo notify-test\n"
+        "  3. Dry-run a cycle:  investment-robo thesis-run --discover --no-trade\n"
+        "  4. Confirm the account is cash-only:  investment-robo check-safety\n"
+        "  GO LIVE (only when ready): set ROBO_FORCE_DRY_RUN=false in .env AND dry_run: false\n"
+        "  in config/robo.yaml — both are required to place real orders."
+    )
 
 
 def main() -> None:

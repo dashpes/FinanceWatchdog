@@ -229,14 +229,18 @@ def validate(
                 f"{available_cash}",
             )
 
-    # 8. Max order size as a fraction of total portfolio value.
-    max_notional = Decimal(str(config.caps.max_order_pct)) * account_state.total_value
-    if gross_cost > max_notional:
-        return GateDecision.reject(
-            order, "exceeds_max_order_pct",
-            f"order notional {gross_cost} exceeds {config.caps.max_order_pct:.0%} "
-            f"of portfolio ({max_notional})",
-        )
+    # 8. Max order size as a fraction of total portfolio value — BUY-only. A SELL must
+    # never be blocked by a size cap: a broken thesis has to be fully exitable, and a
+    # full-position exit legitimately exceeds max_order_pct. This matches the turnover
+    # and position guards below, which are buy-only for exactly the same reason.
+    if order.side is OrderSide.BUY:
+        max_notional = Decimal(str(config.caps.max_order_pct)) * account_state.total_value
+        if gross_cost > max_notional:
+            return GateDecision.reject(
+                order, "exceeds_max_order_pct",
+                f"order notional {gross_cost} exceeds {config.caps.max_order_pct:.0%} "
+                f"of portfolio ({max_notional})",
+            )
 
     # 8b. Concentration + position-count guards on BUYS (disabled by permissive defaults).
     if order.side is OrderSide.BUY:
@@ -250,10 +254,15 @@ def validate(
                     f"{order.symbol} post-buy value {held_value + gross_cost} exceeds "
                     f"{config.caps.max_per_name_weight:.0%} cap ({cap_value})",
                 )
+        # The cash ETF is a cash equivalent, not a portfolio "name" — it must not consume a
+        # position slot (nor be blocked by the cap), or it would crowd out a real holding.
+        cash_etf = (config.cash_etf or "").upper()
+        name_positions = sum(1 for p in account_state.positions if p.symbol.upper() != cash_etf)
         if (
             config.caps.max_positions > 0
+            and order.symbol.upper() != cash_etf
             and account_state.get_position(order.symbol) is None
-            and len(account_state.positions) + extra_positions >= config.caps.max_positions
+            and name_positions + extra_positions >= config.caps.max_positions
         ):
             return GateDecision.reject(
                 order, "max_positions",

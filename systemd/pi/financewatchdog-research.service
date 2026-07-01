@@ -1,0 +1,21 @@
+[Unit]
+Description=FinanceWatchdog robo — continuous overnight research + data-gathering loop
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Long-running loop; it self-limits to its overnight window (RESEARCH_LOOP_START_HOUR/
+# END_HOUR) and sleeps during the day, so systemd just keeps it alive.
+ExecStart=@FW_HOME@/scripts/robo-research-loop.sh
+Restart=always
+RestartSec=30
+# Never trades — it only gathers data, runs confluence, and scores/maintains theses.
+
+[Install]
+WantedBy=multi-user.target

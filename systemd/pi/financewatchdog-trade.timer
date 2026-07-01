@@ -1,0 +1,13 @@
+[Unit]
+Description=FinanceWatchdog robo — trade schedule (07:00 & 12:30, Mon-Fri, local time)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Times are LOCAL — the installer sets the Pi timezone to America/Los_Angeles so
+# these line up with US market hours (06:30-13:00 PT), matching the macOS tuning.
+OnCalendar=Mon-Fri 07:00
+OnCalendar=Mon-Fri 12:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

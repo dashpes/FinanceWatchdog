@@ -279,7 +279,12 @@ def trades_from_raw(transactions: list[Any] | None) -> list[Trade]:
         symbol = str(_first(td, "symbol", default="")).upper()
         qty = _to_decimal(_first(td, "quantity"))
         principal = _to_decimal(_first(td, "principal_amount", "principalAmount"))
-        if not symbol or qty is None or qty <= 0 or principal is None:
+        # Public signs by cash flow, not magnitude: a SELL reports a NEGATIVE quantity
+        # (and a BUY a negative principal). The row's ``side`` already carries the
+        # direction and the magnitudes are abs'd below, so reject only a genuinely
+        # empty fill (zero/None qty) — never a non-zero sell. Guarding ``qty <= 0``
+        # here silently dropped every sell, pinning realized P&L at $0.
+        if not symbol or qty is None or qty == 0 or principal is None:
             continue
         fees = _to_decimal(_first(td, "fees")) or Decimal("0")
         out.append(

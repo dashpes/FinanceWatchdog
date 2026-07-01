@@ -28,6 +28,10 @@ from investment_monitor.robo.models import (
 _CENTS = Decimal("0.01")
 # Skip dust orders below this notional to avoid churn/fees on trivial drift.
 _MIN_ORDER_NOTIONAL = Decimal("1.00")
+# A target WEIGHT at/below this is treated as "thesis gone" -> full exit. Keyed on weight
+# (not a dollar floor) so a valid small target on a tiny account isn't force-liquidated:
+# a dropped/invalidated thesis targets exactly 0, while a kept one targets >= ~1.75%.
+_EXIT_WEIGHT_EPS = 0.005
 
 
 @dataclass
@@ -132,7 +136,31 @@ def generate_candidate_orders(
         drift_value = Decimal(str(row.drift)) * total  # >0 overweight, <0 underweight
 
         if drift_value > 0:
-            # Overweight -> sell the excess (never more than we hold).
+            # Full exit ONLY when the TARGET WEIGHT is ~0 (thesis broke / dropped /
+            # invalidated): sell the ENTIRE holding as a share-QUANTITY order. Public
+            # rejects a market-VALUE sell whose notional ~= the whole position ("use a
+            # quantity order instead"), which used to strand a broken name overweight and
+            # retry forever (ADSK/FLUT). Keyed on target_weight (not a dollar dust floor):
+            # on a ~$50 account a valid 1-2% target is only ~$1 and must NOT be force-sold —
+            # it falls through to the notional trim below. The quantity path is uncapped by
+            # max_order_pct — exiting a broken thesis derisks and must always complete.
+            pos = account_state.get_position(row.symbol)
+            held_qty = pos.quantity if pos else Decimal("0")
+            if row.target_weight <= _EXIT_WEIGHT_EPS and held_qty > 0:
+                orders.append(
+                    ProposedOrder(
+                        symbol=row.symbol,
+                        side=OrderSide.SELL,
+                        order_type=OrderType.MARKET,
+                        quantity=held_qty,
+                        reason=(
+                            f"exit {row.current_weight:.1%} -> target {row.target_weight:.1%}; "
+                            f"sell all {held_qty} shares"
+                        ),
+                    )
+                )
+                continue
+            # Otherwise a partial trim of the excess (never more than we hold).
             notional = min(drift_value, row.current_value, max_notional)
             notional = _round_cents(notional)
             if notional < _MIN_ORDER_NOTIONAL:

@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     email_to: str = ""
     email_use_tls: bool = True
 
+    # SEC EDGAR requires a real contact in the User-Agent of every request (a name
+    # or app plus an email). Set to YOUR email at onboarding. Blank falls back to a
+    # generic contact so a fresh install still works, but you should set it — SEC may
+    # rate-limit or block an anonymous/placeholder agent.
+    sec_contact_email: str = ""
+
     # Ollama
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"
@@ -118,6 +124,15 @@ class Settings(BaseSettings):
 
     # Database
     db_path: Path = Path("data/portfolio.db")
+
+    # Data-retention windows (days) for the robo `prune` job — 0 keeps everything.
+    # Broad collection is universe-independent and never drops rows on its own, so on
+    # an always-on box (the Pi) these bound SQLite growth. Overridable per source in
+    # .env, e.g. RETENTION_NEWS_DAYS=90. The prune timer applies them weekly.
+    retention_insider_days: int = 180
+    retention_news_days: int = 180
+    retention_price_days: int = 180
+    retention_findings_days: int = 365
 
 
 def load_yaml_config(config_dir: Path, filename: str) -> dict[str, Any]:

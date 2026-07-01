@@ -1,0 +1,14 @@
+[Unit]
+Description=FinanceWatchdog robo — daily portfolio + P&L email summary
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Read-only: fetches account state + realized/unrealized P&L and emails it. Never trades.
+ExecStart=@FW_HOME@/scripts/robo-cron.sh daily-summary

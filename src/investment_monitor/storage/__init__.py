@@ -65,6 +65,7 @@ from .robo_models import RoboOrder, RoboRun
 from .robo_operations import (
     count_placed_orders_today,
     finalize_robo_run,
+    get_filled_robo_orders,
     get_recent_robo_runs,
     get_robo_orders_for_run,
     get_unfilled_placed_orders,
@@ -191,6 +192,7 @@ __all__ = [
     "save_robo_order",
     "get_recent_robo_runs",
     "get_robo_orders_for_run",
+    "get_filled_robo_orders",
     "get_unfilled_placed_orders",
     "count_placed_orders_today",
     # Thesis store (autonomous investor)

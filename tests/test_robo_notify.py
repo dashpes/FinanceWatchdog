@@ -36,6 +36,50 @@ def _result(**kw):
     return RebalanceResult(**base)
 
 
+def _account(**kw):
+    from investment_monitor.robo.models import AccountState
+
+    base = dict(
+        account_id="A", is_cash_account=True, has_margin=False,
+        settled_cash=Decimal("100"), positions=[],
+    )
+    base.update(kw)
+    return AccountState(**base)
+
+
+# --- the "why": rationale snapshot + surfacing --------------------------------------
+def test_order_rationale_summarises_the_thesis():
+    from investment_monitor.robo.rebalance import _order_rationale
+
+    thesis = SimpleNamespace(id=7, conviction=0.78, narrative="Insider cluster: 3 insiders bought $937k")
+    assert _order_rationale(thesis) == "78% conviction — Insider cluster: 3 insiders bought $937k"
+    assert _order_rationale(None) == ""  # no owning thesis (rebalance / manual name)
+
+
+def test_daily_summary_shows_todays_trades_with_why():
+    trades = ["  Buy EML — $1.94", "      why: 78% conviction — Insider cluster"]
+    text = notify.format_daily_summary(_account(), None, trades)
+    assert "Today's trades:" in text
+    assert "Buy EML — $1.94" in text
+    assert "why: 78% conviction — Insider cluster" in text
+
+
+def test_todays_trade_lines_reads_rationale_from_db(tmp_path):
+    from investment_monitor.storage import RoboOrder, get_session, init_db, save_robo_order
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    with get_session() as s:
+        save_robo_order(s, RoboOrder(
+            run_id="r1", symbol="EML", side="buy", order_type="market", notional=1.94,
+            source="deterministic", placed=True, status="placed",
+            rationale="78% conviction — Insider cluster: 3 insiders bought $937k",
+        ))
+    lines = notify.todays_trade_lines(SimpleNamespace(db_path=str(db)))
+    assert any("Buy EML" in line for line in lines)
+    assert any("why: 78% conviction — Insider cluster" in line for line in lines)
+
+
 # --- notify_run: trades ----------------------------------------------------------
 
 def test_live_placements_send_one_text_with_orders():

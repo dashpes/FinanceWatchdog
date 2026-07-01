@@ -90,6 +90,29 @@ def risk_from_sim(sim) -> RiskMetrics | None:
     )
 
 
+def smoothed_conviction(convictions: Sequence[float], current: float, halflife_points: float) -> float:
+    """Pure: recency-weighted (EWMA) mean of recent conviction points, to damp wobble.
+
+    The newest point weighs most (weight halves every ``halflife_points`` going back), but
+    no single point dominates — so a one-off spike that reverts (an overnight 0.7->0.4->0.7)
+    barely moves the size, while a SUSTAINED shift (repeated 0.4s, or a decay toward 0) is
+    followed. ``halflife_points <= 0`` or an empty series returns the raw ``current`` value
+    (smoothing off). Callers must NOT smooth a broken/invalidated thesis — pass its zero
+    straight through so exits stay prompt.
+    """
+    if halflife_points <= 0 or not convictions:
+        return _clamp01(current)
+    decay = 0.5 ** (1.0 / halflife_points)
+    acc = 0.0
+    weight_sum = 0.0
+    w = 1.0
+    for conv in reversed(list(convictions)):  # newest first, decaying into the past
+        acc += w * _clamp01(conv)
+        weight_sum += w
+        w *= decay
+    return _clamp01(acc / weight_sum) if weight_sum > 0 else _clamp01(current)
+
+
 def decay_conviction(conviction: float, age_days: float, cfg: SizingConfig) -> float:
     """Decay raw conviction toward ``cfg.conviction_floor`` with a half-life.
 
@@ -147,6 +170,35 @@ def accuracy_multiplier(
     return _clamp(1.0 + accuracy_weight * (hit_rate - 0.5) * 2.0, floor, ceiling)
 
 
+def is_averaging_up_without_support(
+    *,
+    avg_cost: float | None,
+    ref_price: float | None,
+    current_conviction: float,
+    entry_conviction: float | None,
+    cfg: SizingConfig,
+) -> bool:
+    """Pure: should a BUY that ADDS to a held position be BLOCKED as unjustified chasing?
+
+    True only when the buy would raise cost basis — ``ref_price`` above ``avg_cost`` beyond
+    ``average_up_tolerance`` — AND the thesis has NOT strengthened: conviction is neither
+    already strong (``>= strong_add_conviction``) nor materially above where it was at entry
+    (``>= entry_conviction + add_strengthen_margin``). Averaging DOWN (buying at/below cost)
+    is never blocked. Missing cost/price data fails OPEN (returns False), and disabling
+    ``block_average_up`` returns False. Opening a NEW position is the caller's concern.
+    """
+    if not cfg.block_average_up or avg_cost is None or ref_price is None or float(avg_cost) <= 0:
+        return False
+    if float(ref_price) <= float(avg_cost) * (1.0 + cfg.average_up_tolerance):
+        return False  # at/below cost (averaging down) — always allowed
+    cur = _clamp01(current_conviction)
+    strengthened = cur >= cfg.strong_add_conviction or (
+        entry_conviction is not None
+        and cur >= _clamp01(entry_conviction) + cfg.add_strengthen_margin
+    )
+    return not strengthened
+
+
 def _accuracy_mult(session: "Session", symbol: str, account_id: str | None, lcfg) -> float:
     """Impure: read a symbol's accuracy stats and derive its multiplier (fail-open)."""
     try:
@@ -175,6 +227,25 @@ def _latest_sim(session: "Session", symbol: str):
     return sims[0] if sims else None
 
 
+def _sizing_conviction(thesis, cfg: SizingConfig) -> float:
+    """Conviction to SIZE from: EWMA-smoothed over recent history to damp churn.
+
+    A broken/invalidated thesis (conviction 0, or status INVALIDATED) is passed straight
+    through UNsmoothed, so its exit is never delayed by an averaged-in past high. Bounds
+    the history tail so ancient points can't anchor today's size.
+    """
+    current = _clamp01(thesis.conviction)
+    if current <= 0 or str(getattr(thesis, "status", "") or "").upper() == "INVALIDATED":
+        return current
+    history = thesis.conviction_history or []
+    convs = [
+        float(h["conviction"])
+        for h in history
+        if isinstance(h, dict) and h.get("conviction") is not None
+    ]
+    return smoothed_conviction(convs[-24:], current, cfg.conviction_smoothing_halflife)
+
+
 def compute_conviction_weights(
     session: "Session",
     config: RoboConfig,
@@ -196,9 +267,17 @@ def compute_conviction_weights(
 
     raw: dict[str, float] = {}
     for thesis in get_active_theses(session, account_id):
-        eff_conviction = decay_conviction(
-            thesis.conviction, _age_days(thesis.last_evaluated_at, now), cfg
-        )
+        # Smooth the raw (noisy, ~45-min) re-eval conviction so sizing moves on SUSTAINED
+        # thesis changes, not intraday wobble.
+        smoothed = _sizing_conviction(thesis, cfg)
+        # Concentration: a below-threshold-conviction thesis gets no capital (hold fewer,
+        # stronger names). Gate on the SMOOTHED, PRE-decay conviction — decay relaxes a
+        # stale value toward conviction_floor (0.5) and could otherwise re-inflate a
+        # weak/zero name back above the drop threshold.
+        if smoothed < cfg.min_conviction_to_hold:
+            continue
+        # Then the usual time-decay for the SIZING magnitude.
+        eff_conviction = decay_conviction(smoothed, _age_days(thesis.last_evaluated_at, now), cfg)
         weight = size_position(eff_conviction, risk_from_sim(_latest_sim(session, thesis.symbol)), cfg)
         # Feedback loop: tilt size by the symbol's realized accuracy (no-op at 1.0
         # until enough outcomes accrue; shrink-only unless modifier_ceiling > 1.0).
@@ -211,6 +290,12 @@ def compute_conviction_weights(
                 raw.get(thesis.symbol, 0.0) + weight, cfg.max_position_weight
             )
 
+    # Concentration cap: keep only the top-N names by size, so a long tail of small theses
+    # doesn't spread the book thin (the rest of the intended equity falls to cash/the ETF).
+    max_positions = config.caps.max_positions
+    if max_positions and max_positions > 0 and len(raw) > max_positions:
+        raw = dict(sorted(raw.items(), key=lambda kv: kv[1], reverse=True)[:max_positions])
+
     # Keep at least min_cash_weight in cash: scale equity down proportionally if over.
     total = sum(raw.values())
     max_equity = 1.0 - cfg.min_cash_weight
@@ -219,7 +304,16 @@ def compute_conviction_weights(
         raw = {s: w * scale for s, w in raw.items()}
 
     alloc = dict(raw)
-    alloc[CASH_SYMBOL] = max(0.0, 1.0 - sum(raw.values()))
+    cash_remainder = max(0.0, 1.0 - sum(raw.values()))
+    # Park the cash above the raw min_cash_weight buffer in the T-bill ETF, if configured,
+    # so uninvested capital earns yield instead of sitting idle. A raw-cash buffer remains
+    # for fees/settlement and to fund small buys without first selling the ETF.
+    cash_etf = (getattr(config, "cash_etf", "") or "").strip().upper()
+    if cash_etf and cash_etf != CASH_SYMBOL and cash_remainder > cfg.min_cash_weight:
+        alloc[cash_etf] = alloc.get(cash_etf, 0.0) + (cash_remainder - cfg.min_cash_weight)
+        alloc[CASH_SYMBOL] = cfg.min_cash_weight
+    else:
+        alloc[CASH_SYMBOL] = cash_remainder
     return alloc
 
 
@@ -227,7 +321,9 @@ __all__ = [
     "RiskMetrics",
     "risk_from_sim",
     "decay_conviction",
+    "smoothed_conviction",
     "size_position",
     "accuracy_multiplier",
+    "is_averaging_up_without_support",
     "compute_conviction_weights",
 ]

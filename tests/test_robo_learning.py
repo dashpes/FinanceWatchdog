@@ -21,7 +21,12 @@ from investment_monitor.analysis.thesis_prompts import (
     THESIS_UPDATE_PROMPT_WITH_OUTCOME,
 )
 from investment_monitor.robo.config import LearningConfig, RoboCaps, RoboConfig, SizingConfig
-from investment_monitor.robo.sizing import accuracy_multiplier, compute_conviction_weights
+from investment_monitor.robo.sizing import (
+    accuracy_multiplier,
+    compute_conviction_weights,
+    is_averaging_up_without_support,
+    smoothed_conviction,
+)
 from investment_monitor.storage import (
     Price,
     SimulationResult,
@@ -69,17 +74,143 @@ def test_accuracy_multiplier_dampens_poor_and_clamps():
     assert floored == 0.5
 
 
-def test_accuracy_multiplier_shrink_only_by_default():
-    # A great track record cannot inflate exposure when ceiling == 1.0.
+def test_accuracy_multiplier_shrink_only_when_ceiling_is_one():
+    # With ceiling == 1.0 a great track record cannot inflate exposure (old behaviour).
     assert accuracy_multiplier(
         {"n": 8, "ewma_hit_rate": 0.95}, accuracy_weight=0.5, floor=0.5, ceiling=1.0, min_samples=6
     ) == 1.0
-    # But it can when an operator opts into amplification.
+    # But it can when the ceiling is raised (amplification clamped to the ceiling).
     amp = accuracy_multiplier(
         {"n": 8, "ewma_hit_rate": 1.0}, accuracy_weight=0.5, floor=0.5, ceiling=1.25, min_samples=6
     )
-    assert abs(amp - 1.5) < 1e-9 or amp == 1.25  # 1.5 clamped to ceiling 1.25
-    assert amp == 1.25
+    assert amp == 1.25  # 1.5 clamped to ceiling 1.25
+
+
+def test_accuracy_multiplier_rewards_winners_by_default():
+    # The default learning band is now symmetric (0.5..1.5): a proven winner sizes UP,
+    # not just losers cut — so the loop adds to names whose track record justifies it.
+    cfg = LearningConfig()
+    assert cfg.modifier_floor == 0.5 and cfg.modifier_ceiling == 1.5
+    amp = accuracy_multiplier(
+        {"n": 8, "ewma_hit_rate": 1.0}, accuracy_weight=cfg.accuracy_weight,
+        floor=cfg.modifier_floor, ceiling=cfg.modifier_ceiling, min_samples=cfg.min_samples,
+    )
+    assert abs(amp - 1.5) < 1e-9
+
+
+def test_smoothed_conviction_damps_a_one_off_spike():
+    # A single reverting wobble (…0.7, 0.4, 0.7) barely moves the smoothed value.
+    assert abs(smoothed_conviction([0.7] * 8, 0.7, 3.0) - 0.7) < 1e-9
+    val = smoothed_conviction([0.7, 0.7, 0.7, 0.4, 0.7], 0.7, 3.0)
+    assert 0.6 < val < 0.7  # damped toward 0.7, not dragged to 0.4
+
+
+def test_smoothed_conviction_follows_a_sustained_move():
+    # A sustained decline is followed down, so a genuinely broken thesis still exits.
+    assert smoothed_conviction([0.7, 0.6, 0.4, 0.2, 0.1], 0.1, 3.0) < 0.35
+
+
+def test_smoothed_conviction_off_when_halflife_zero_or_empty():
+    assert smoothed_conviction([0.2, 0.9], 0.9, 0.0) == 0.9   # smoothing disabled
+    assert smoothed_conviction([], 0.55, 3.0) == 0.55          # no history -> raw
+
+
+# --------------------------------------------------------------------------- #
+# Anti-averaging-up add gate + cash-ETF parking
+# --------------------------------------------------------------------------- #
+def test_average_up_gate_blocks_unjustified_chasing():
+    cfg = SizingConfig()  # block=True, tol 0.03, margin 0.15, strong 0.7
+    up = dict(avg_cost=100.0, ref_price=110.0)  # +10% over cost
+    # Flat conviction vs entry -> block the chase.
+    assert is_averaging_up_without_support(**up, current_conviction=0.4, entry_conviction=0.4, cfg=cfg) is True
+    # Averaging DOWN -> always allowed.
+    assert is_averaging_up_without_support(avg_cost=100.0, ref_price=95.0, current_conviction=0.4, entry_conviction=0.4, cfg=cfg) is False
+    # Within tolerance (+2%) -> allowed.
+    assert is_averaging_up_without_support(avg_cost=100.0, ref_price=102.0, current_conviction=0.4, entry_conviction=0.4, cfg=cfg) is False
+    # Thesis strengthened since entry (0.4 -> 0.6 >= 0.4+0.15) -> allowed even above cost.
+    assert is_averaging_up_without_support(**up, current_conviction=0.6, entry_conviction=0.4, cfg=cfg) is False
+    # Already strong conviction (>= 0.7) -> allowed.
+    assert is_averaging_up_without_support(**up, current_conviction=0.75, entry_conviction=0.7, cfg=cfg) is False
+    # Missing cost data -> fail open (allowed).
+    assert is_averaging_up_without_support(avg_cost=None, ref_price=110.0, current_conviction=0.1, entry_conviction=0.1, cfg=cfg) is False
+    # Gate disabled -> allowed.
+    off = SizingConfig(block_average_up=False)
+    assert is_averaging_up_without_support(avg_cost=100.0, ref_price=200.0, current_conviction=0.1, entry_conviction=0.1, cfg=off) is False
+
+
+def test_drop_unsupported_adds_filters_only_unjustified_adds(tmp_path):
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from investment_monitor.robo.models import AccountState, OrderSide, Position, ProposedOrder
+    from investment_monitor.robo.rebalance import _drop_unsupported_adds
+
+    acct = AccountState(
+        account_id="A", is_cash_account=True, has_margin=False, settled_cash=Decimal("10"),
+        positions=[Position(symbol="EML", quantity=Decimal("0.2"), price=Decimal("110"), unit_cost=Decimal("100"))],
+    )
+    cfg = RoboConfig(target_allocation={"EML": 0.5, "CASH": 0.5}, cash_etf="SGOV")
+    prices = {"EML": Decimal("110")}  # +10% over the $100 cost
+    add = ProposedOrder(symbol="EML", side=OrderSide.BUY, notional=Decimal("2"))
+
+    def flat(_s):  # conviction unchanged since entry -> chasing -> dropped
+        return SimpleNamespace(id=1, conviction=0.4, conviction_history=[{"conviction": 0.4}])
+
+    def stronger(_s):  # thesis strengthened -> add kept
+        return SimpleNamespace(id=1, conviction=0.8, conviction_history=[{"conviction": 0.4}])
+
+    assert _drop_unsupported_adds([add], acct, prices, flat, cfg) == []          # blocked
+    assert len(_drop_unsupported_adds([add], acct, prices, stronger, cfg)) == 1  # justified
+    # A NEW open (no held position) is never blocked.
+    new = ProposedOrder(symbol="NEW", side=OrderSide.BUY, notional=Decimal("2"))
+    assert len(_drop_unsupported_adds([new], acct, {}, flat, cfg)) == 1
+    # A SELL is never touched.
+    sell = ProposedOrder(symbol="EML", side=OrderSide.SELL, notional=Decimal("2"))
+    assert len(_drop_unsupported_adds([sell], acct, prices, flat, cfg)) == 1
+    # No thesis (rebalance mode / manual holding) must FAIL OPEN — the add is kept, not
+    # silently dropped (regression: the gate is thesis-aware, not a blanket no-average-up).
+    assert len(_drop_unsupported_adds([add], acct, prices, lambda _s: None, cfg)) == 1
+
+
+def test_cash_etf_parks_idle_cash(tmp_path):
+    db = tmp_path / "t.db"
+    _seed_voo(db)  # one thesis -> equity weight < max, remainder is cash
+    base = RoboConfig(
+        mode="autonomous", target_allocation={}, allowlist=[],
+        caps=RoboCaps(max_order_pct=0.5, max_orders_per_run=10, max_orders_per_day=20),
+        learning=LearningConfig(),
+    )
+    with get_session() as s:
+        no_etf = compute_conviction_weights(s, base)
+        with_etf = compute_conviction_weights(s, base.model_copy(update={"cash_etf": "SGOV"}))
+    # Without an ETF: the remainder is raw CASH, none parked.
+    assert no_etf.get("SGOV", 0.0) == 0.0 and no_etf["CASH"] > base.sizing.min_cash_weight
+    # With an ETF: cash above the min buffer is parked in SGOV; raw CASH == the buffer.
+    assert with_etf["SGOV"] > 0
+    assert abs(with_etf["CASH"] - base.sizing.min_cash_weight) < 1e-9
+    assert abs(with_etf["VOO"] - no_etf["VOO"]) < 1e-9  # equity weight unchanged
+
+
+def test_concentration_drops_weak_and_caps_position_count(tmp_path):
+    # Hold FEWER, STRONGER names: a weak thesis gets no capital, and only the top-N by size
+    # are held — capital isn't spread thin across every marginal idea.
+    db = tmp_path / "t.db"
+    init_db(db)
+    with get_session() as s:
+        for sym, conv in [("AAA", 0.9), ("BBB", 0.7), ("CCC", 0.5), ("WEAK", 0.1)]:
+            save_thesis(s, Thesis(symbol=sym, conviction=conv, status=ThesisStatus.ACTIVE.value,
+                                  entry_conditions={"entry_price": 100.0}))
+    cfg = RoboConfig(
+        mode="autonomous", target_allocation={}, allowlist=[],
+        caps=RoboCaps(max_order_pct=0.5, max_positions=2, max_orders_per_run=10, max_orders_per_day=20),
+        learning=LearningConfig(),
+    )
+    with get_session() as s:
+        alloc = compute_conviction_weights(s, cfg)
+    assert "WEAK" not in alloc                                    # 0.1 < 0.35 -> no capital
+    held = [k for k in alloc if k != "CASH"]
+    assert set(held) == {"AAA", "BBB"}                            # only the top-2 by size
+    assert alloc["CASH"] > 0                                      # the rest stays in cash
 
 
 # --------------------------------------------------------------------------- #
@@ -405,7 +536,7 @@ def test_reconcile_fill_costs_writes_broker_basis(tmp_path):
     # fill_cost must be the thesis's OWN entry-order fill price (450, from the
     # reconciled BUY), NOT the broker's blended unit cost (999 here) — the blend
     # folds in pre-existing/independent shares and would bias calibration.
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     from decimal import Decimal
 
     from investment_monitor.robo.models import AccountState, OrderSide, Position
