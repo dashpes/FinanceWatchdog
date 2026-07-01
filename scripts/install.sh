@@ -169,6 +169,13 @@ else
   echo "  $INIT_HINT"
 fi
 
+# Lock down .env however it arrived — a scp'd secrets file isn't 0600 (scp doesn't
+# preserve mode) and must be owned by the runtime user to be readable by the services.
+if [ -f "$FW_HOME/.env" ]; then
+  chown "$FW_USER:$FW_USER" "$FW_HOME/.env"
+  chmod 600 "$FW_HOME/.env"
+fi
+
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
 for t in trade summary prune; do
@@ -187,3 +194,8 @@ echo "AND dry_run: false in $FW_HOME/config/robo.yaml. Useful checks:"
 echo "  systemctl list-timers 'financewatchdog-*'"
 echo "  sudo -u $FW_USER $FW_HOME/.venv/bin/investment-robo check-safety --config $FW_HOME/config"
 echo "  journalctl -u financewatchdog-research -f"
+
+# If a copied .env/robo.yaml already arms live trading, warn about the two-bots-one-account trap.
+if grep -qE '^[[:space:]]*ROBO_FORCE_DRY_RUN[[:space:]]*=[[:space:]]*false' "$FW_HOME/.env" 2>/dev/null; then
+  warn "LIVE TRADING is armed in this .env (ROBO_FORCE_DRY_RUN=false). If ANOTHER machine (e.g. your Mac) still trades this brokerage account, both bots will place orders on the SAME account and conflict. Stand down the other deployment first, or set ROBO_FORCE_DRY_RUN=true here until you've validated a dry-run cycle on the Pi."
+fi
