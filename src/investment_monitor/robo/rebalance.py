@@ -35,6 +35,7 @@ from investment_monitor.robo.gate import validate_orders
 from investment_monitor.robo.llm import RoboProposer
 from investment_monitor.robo.market_hours import is_market_open
 from investment_monitor.robo.models import AccountState, GateDecision, OrderSide
+from investment_monitor.robo.sizing import is_averaging_up_without_support
 from investment_monitor.robo.signals import fetch_signals
 from investment_monitor.storage import (
     RoboOrder,
@@ -43,12 +44,80 @@ from investment_monitor.storage import (
     finalize_robo_run,
     get_active_symbols,
     get_active_theses,
+    get_thesis,
     get_unfilled_placed_orders,
     get_session,
     init_db,
     save_robo_order,
     save_robo_run,
 )
+
+
+def _order_rationale(thesis) -> str:
+    """A concise human 'why' for an order, snapshotted from its thesis.
+
+    Persisted on the order (rebalance's `reason` is the mechanical drift math; this is
+    the investment justification) so it survives the thesis later mutating/invalidating,
+    and is surfaced in trade emails. Empty when there is no owning thesis (rebalance mode
+    or a manual position being trimmed).
+    """
+    if thesis is None:
+        return ""
+    narrative = " ".join((thesis.narrative or "").split())
+    if len(narrative) > 200:
+        narrative = narrative[:199].rstrip() + "…"
+    conviction = thesis.conviction if thesis.conviction is not None else 0.0
+    return f"{conviction:.0%} conviction — {narrative}" if narrative else f"{conviction:.0%} conviction"
+
+
+def _entry_conviction(thesis) -> float | None:
+    """Conviction recorded when the thesis was first established (history[0]), if any."""
+    if thesis is None:
+        return None
+    for h in thesis.conviction_history or []:
+        if isinstance(h, dict) and h.get("conviction") is not None:
+            return float(h["conviction"])
+    return None
+
+
+def _drop_unsupported_adds(orders, account, prices, thesis_for, config):
+    """Drop BUYs that would average UP a held position without a strengthened thesis.
+
+    Opening a NEW position and averaging DOWN (buying at/below cost) always pass; an ADD
+    above cost is kept only when the owning thesis has strengthened
+    (sizing.is_averaging_up_without_support). Sells are untouched. Fail-open: any lookup
+    error keeps the order rather than silently dropping a trade.
+    """
+    cash_etf = (config.cash_etf or "").upper()
+    kept = []
+    for o in orders:
+        try:
+            if o.side is OrderSide.BUY and o.symbol.upper() != cash_etf:
+                pos = account.get_position(o.symbol)
+                thesis = thesis_for(o.symbol) if pos is not None else None
+                # Only gate an ADD to a held name that HAS a thesis. No thesis (rebalance
+                # mode / manual holding) fails OPEN — the add-gate is a thesis-aware guard,
+                # not a general no-average-up rule, so it must never block ordinary
+                # rebalancing back to a fixed target.
+                if pos is not None and pos.quantity and pos.quantity > 0 and thesis is not None:
+                    ref_price = prices.get(o.symbol) or pos.price
+                    cur = float(thesis.conviction) if thesis.conviction is not None else 0.0
+                    if is_averaging_up_without_support(
+                        avg_cost=float(pos.unit_cost) if pos.unit_cost is not None else None,
+                        ref_price=float(ref_price) if ref_price is not None else None,
+                        current_conviction=cur,
+                        entry_conviction=_entry_conviction(thesis),
+                        cfg=config.sizing,
+                    ):
+                        logger.info(
+                            "add-gate: skipping add to {s} — would average up without a "
+                            "strengthened thesis", s=o.symbol,
+                        )
+                        continue
+        except Exception as exc:  # noqa: BLE001 - the add-gate must never break a run
+            logger.warning("add-gate check failed for {s} (keeping order): {e}", s=o.symbol, e=exc)
+        kept.append(o)
+    return kept
 
 
 @dataclass
@@ -329,17 +398,32 @@ def rebalance_run(
         orders, source = proposer.propose(
             account, signals=snapshot, session=session, account_id=account.account_id or None
         )
+
+        # Per-symbol thesis cache (most-recent non-EXITED thesis, any live/invalidated
+        # status) — used to justify adds and to snapshot each order's rationale below.
+        thesis_cache: dict[str, object] = {}
+
+        def _thesis_for(symbol: str):
+            if symbol not in thesis_cache:
+                thesis_cache[symbol] = get_thesis(session, symbol, account.account_id or None)
+            return thesis_cache[symbol]
+
+        # Don't chase: drop BUYs that would average UP a held position without a
+        # strengthened thesis (raising cost basis for no new reason).
+        orders = _drop_unsupported_adds(orders, account, prices, _thesis_for, config)
         for order in orders:
             audit.proposal(order)
 
         # In autonomous mode the tradeable universe is the set of names with a live
-        # thesis, plus anything currently held (so positions can always be exited).
-        # The gate then enforces it for free via its existing allowlist check, and
-        # the additive `no_active_thesis` guard restricts BUYs to thesis names.
+        # thesis, anything currently held (so positions can always be exited), plus the
+        # cash ETF (a valid buy target for parking idle cash). The gate enforces it via
+        # its allowlist check, and the `no_active_thesis` guard restricts BUYs to this set.
         gate_config = config
         active_symbols: set[str] | None = None
         if config.mode == "autonomous":
             active_symbols = get_active_symbols(session, account.account_id or None)
+            if config.cash_etf:
+                active_symbols = active_symbols | {config.cash_etf.upper()}
             held = {p.symbol for p in account.positions}
             gate_config = config.model_copy(update={"allowlist": sorted(active_symbols | held)})
 
@@ -380,6 +464,9 @@ def rebalance_run(
             for decision in decisions:
                 audit.gate_decision(decision)
                 order = decision.order
+                # Snapshot the owning thesis's "why" onto the order (survives later thesis
+                # mutation; surfaced in trade emails). None for rebalance-mode/manual names.
+                thesis = _thesis_for(order.symbol)
                 order_row = RoboOrder(
                     run_id=run_id, symbol=order.symbol,
                     side=order.side.value, order_type=order.order_type.value,
@@ -389,6 +476,8 @@ def rebalance_run(
                     source=order.source, reason=order.reason,
                     gate_accepted=decision.accepted, gate_code=decision.code,
                     gate_reason=decision.reason,
+                    thesis_id=thesis.id if thesis is not None else None,
+                    rationale=_order_rationale(thesis),
                 )
                 if not decision.accepted:
                     num_rejected += 1

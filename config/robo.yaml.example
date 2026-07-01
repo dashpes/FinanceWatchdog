@@ -126,3 +126,8 @@ ollama_model: ""
 # Optional: the specific Public account number to trade. Required only if your
 # token can see more than one account. Blank = use the single/default account.
 account_id: ""
+
+# Optional cash sleeve (autonomous mode): park intended cash above min_cash_weight in
+# this short-term Treasury ETF so idle capital earns ~T-bill yield while staying liquid.
+# Blank = hold raw cash. e.g. SGOV or BIL.
+cash_etf: ""

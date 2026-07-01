@@ -30,6 +30,7 @@ from investment_monitor.robo.notify import (
     notify_run,
     send_daily_summary,
     send_test,
+    todays_trade_lines,
 )
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
@@ -567,8 +568,9 @@ def daily_summary(
     except Exception as exc:  # noqa: BLE001 - realized P&L is best-effort, never required
         typer.secho(f"(realized P&L unavailable: {exc})", fg=typer.colors.YELLOW)
 
-    typer.echo(format_daily_summary(account, realized))
-    sent = send_daily_summary(settings, account, realized)
+    trades = todays_trade_lines(settings)
+    typer.echo(format_daily_summary(account, realized, trades))
+    sent = send_daily_summary(settings, account, realized, trades)
     if notifications_configured(settings) and not sent:
         typer.secho(
             "(summary not sent — check notification config / logs)",

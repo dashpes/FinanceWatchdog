@@ -71,6 +71,13 @@ class RoboOrder(Base):
     fill_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
     fill_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
+    # WHY this order (autonomous mode): the owning thesis and a concise human rationale,
+    # SNAPSHOTTED at proposal time so it survives later thesis mutation/invalidation. The
+    # order's `reason` is the mechanical drift math; this is the investment justification
+    # surfaced in trade emails. Null for rebalance-mode / manual-position orders.
+    thesis_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False
     )

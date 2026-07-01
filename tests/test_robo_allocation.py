@@ -82,6 +82,43 @@ def test_generate_orders_trims_overweight_position():
     assert voo.notional == Decimal("25.00")  # min(drift $30, held $80, cap $25)
 
 
+def test_full_exit_uses_a_share_quantity_sell():
+    # A held name whose target is ~0 (thesis broke) must be exited with a QUANTITY sell of
+    # the WHOLE position — Public rejects a market-value sell ~= the position value, which
+    # used to strand a broken name overweight forever (ADSK/FLUT).
+    cfg = make_config().model_copy(update={"target_allocation": {"VOO": 0.0, "CASH": 1.0}})
+    acct = make_account(settled_cash="10", positions=[
+        Position(symbol="VOO", quantity=Decimal("0.5"), price=Decimal("80")),  # $40 of $50 -> 80%
+    ])
+    voo = [o for o in generate_candidate_orders(acct, cfg) if o.symbol == "VOO"][0]
+    assert voo.side is OrderSide.SELL
+    assert voo.quantity == Decimal("0.5")   # sell ALL shares...
+    assert voo.notional is None             # ...as a quantity order, not a market-value one
+    assert "exit" in voo.reason.lower()
+
+
+def test_small_but_valid_target_is_trimmed_not_liquidated():
+    # Regression: a small (2%) BUT non-zero target on a tiny account must NOT be misread as
+    # "thesis broke" and force-liquidated — only target ~0 triggers a full quantity exit.
+    cfg = make_config().model_copy(update={"target_allocation": {"VOO": 0.02, "CASH": 0.98}})
+    acct = make_account(settled_cash="10", positions=[
+        Position(symbol="VOO", quantity=Decimal("0.5"), price=Decimal("80")),  # $40 of $50 -> 80%
+    ])
+    voo = [o for o in generate_candidate_orders(acct, cfg) if o.symbol == "VOO"][0]
+    assert voo.side is OrderSide.SELL
+    assert voo.notional is not None and voo.quantity is None  # a trim, not a full exit
+
+
+def test_partial_trim_still_uses_a_notional_order():
+    # A meaningful remaining target -> unchanged notional trim (not a full exit).
+    cfg = make_config().model_copy(update={"target_allocation": {"VOO": 0.3, "CASH": 0.7}})
+    acct = make_account(settled_cash="20", positions=[
+        Position(symbol="VOO", quantity=Decimal("1"), price=Decimal("80")),  # $80 of $100 -> 80%
+    ])
+    voo = [o for o in generate_candidate_orders(acct, cfg) if o.symbol == "VOO"][0]
+    assert voo.side is OrderSide.SELL and voo.notional is not None and voo.quantity is None
+
+
 def test_generate_orders_respects_per_run_cap():
     acct = make_account(settled_cash="100")
     orders = generate_candidate_orders(acct, make_config(max_orders_per_run=1))

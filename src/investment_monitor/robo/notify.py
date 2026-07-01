@@ -186,11 +186,54 @@ def _placed_order_lines(run_id: str, settings: Settings) -> list[str]:
                 f"  {order_row.side.title()} {order_row.symbol} — "
                 f"{_order_size(order_row)}{_fill_suffix(order_row)}"
             )
+            # The investment 'why', when the order had an owning thesis.
+            why = (getattr(order_row, "rationale", None) or "").strip()
+            if why:
+                lines.append(f"      why: {why}")
     return lines
 
 
-def format_daily_summary(account: AccountState, realized: RealizedPnL | None = None) -> str:
-    """Build the daily-summary text (pure: no I/O, no DB, no network)."""
+def todays_trade_lines(settings: Settings) -> list[str]:
+    """Today's (UTC) placed/simulated orders with their rationale — for the daily summary."""
+    from datetime import datetime, timezone
+
+    from investment_monitor.storage import get_session, init_db
+    from investment_monitor.storage.robo_models import RoboOrder
+
+    init_db(settings.db_path)
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    lines: list[str] = []
+    try:
+        with get_session() as session:
+            rows = (
+                session.query(RoboOrder)
+                .filter(RoboOrder.created_at >= start)
+                .order_by(RoboOrder.created_at.asc())
+                .all()
+            )
+            for r in rows:
+                if not (r.placed or r.simulated):
+                    continue
+                lines.append(f"  {r.side.title()} {r.symbol} — {_order_size(r)}{_fill_suffix(r)}")
+                why = (getattr(r, "rationale", None) or "").strip()
+                if why:
+                    lines.append(f"      why: {why}")
+    except Exception as exc:  # noqa: BLE001 - the summary must never fail on the trades block
+        logger.warning("todays_trade_lines failed (ignored): {e}", e=exc)
+    return lines
+
+
+def format_daily_summary(
+    account: AccountState,
+    realized: RealizedPnL | None = None,
+    trades: list[str] | None = None,
+) -> str:
+    """Build the daily-summary text (pure: no I/O, no DB, no network).
+
+    ``trades`` is a pre-formatted list of today's trade lines (with their 'why'); when
+    non-empty it is shown as a "Today's trades" section so the summary explains what the
+    advisor did and why, not just the ending balances.
+    """
     body = [
         f"{'Portfolio value':<18}{_money(account.total_value)}",
         f"{'Cash available':<18}{_money(account.settled_cash)}",
@@ -202,6 +245,11 @@ def format_daily_summary(account: AccountState, realized: RealizedPnL | None = N
         body.append(f"{'Unrealised P&L':<18}{_signed_money(unrealized)}{pct}")
     if realized is not None:
         body.append(f"{'Realised P&L':<18}{_signed_money(realized.total_realized)}")
+
+    if trades:
+        body.append("")
+        body.append("Today's trades:")
+        body.extend(trades)
 
     movers = [p for p in account.positions if p.unrealized_gain is not None]
     movers.sort(key=lambda p: abs(p.unrealized_gain), reverse=True)
@@ -255,12 +303,17 @@ def notify_error(settings: Settings, *, message: str, dry_run: bool | None = Non
 
 
 def send_daily_summary(
-    settings: Settings, account: AccountState, realized: RealizedPnL | None = None
+    settings: Settings,
+    account: AccountState,
+    realized: RealizedPnL | None = None,
+    trades: list[str] | None = None,
 ) -> bool:
     """Send the daily portfolio/P&L summary. Returns True if sent."""
     try:
         title = f"Daily Portfolio Summary · {_british_date(date.today())}"
-        return _send(settings, format_daily_summary(account, realized), subject=_subject(title))
+        return _send(
+            settings, format_daily_summary(account, realized, trades), subject=_subject(title)
+        )
     except Exception as exc:  # noqa: BLE001 - fail-open
         logger.warning("robo daily summary notify failed (ignored): {e}", e=exc)
         return False
@@ -270,7 +323,7 @@ def send_test(settings: Settings) -> bool:
     """Send a test message so the operator can verify notification setup."""
     title = "Notification Test"
     body = (
-        f"This confirms your advisory notifications are configured correctly.\n"
-        f"I shall be in touch with trade confirmations and your daily summary."
+        "This confirms your advisory notifications are configured correctly.\n"
+        "I shall be in touch with trade confirmations and your daily summary."
     )
     return _send(settings, _compose(title, body), subject=_subject(title))
