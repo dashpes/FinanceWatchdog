@@ -36,8 +36,9 @@ ai = [
 ]
 robo = [
     # Public.com official Trading API SDK (import root: public_api_sdk).
-    # Pre-1.0 and prone to churn; pin if needed.
-    "publicdotcom-py>=0.1.15",
+    # Pre-1.0 and prone to churn — PINNED exactly because it sits on the money path;
+    # bump deliberately (test, then cut a release) rather than floating.
+    "publicdotcom-py==0.1.16",
 ]
 dashboard = [
     "fastapi>=0.100.0",

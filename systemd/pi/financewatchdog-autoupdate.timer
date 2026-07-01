@@ -1,0 +1,12 @@
+[Unit]
+Description=FinanceWatchdog robo — auto-update schedule (daily 06:15, local time)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Daily, after the overnight research window closes (06:00) and before the 07:00
+# trade — so a box always trades on the latest released code.
+OnCalendar=*-*-* 06:15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

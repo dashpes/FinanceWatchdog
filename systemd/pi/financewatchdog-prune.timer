@@ -1,0 +1,12 @@
+[Unit]
+Description=FinanceWatchdog robo — weekly prune schedule (Sun 12:00, local time)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Sunday noon: market closed and the overnight research loop is idle, so the shared
+# run-lock is free and the prune won't be skipped.
+OnCalendar=Sun 12:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
