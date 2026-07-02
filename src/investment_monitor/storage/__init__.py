@@ -93,6 +93,7 @@ from .thesis_operations import (
 from .learning_models import (
     LEARNING_KIND_ACCURACY_MODIFIER,
     LEARNING_KIND_OUTCOME,
+    LEARNING_KIND_SHADOW_OUTCOME,
     LEARNING_KIND_WEIGHT_ADAPTATION,
     LearningEvent,
 )
@@ -104,6 +105,24 @@ from .learning_operations import (
     outcome_metrics,
     record_learning_event,
     record_thesis_outcome,
+)
+from .shadow_models import (
+    SHADOW_SOURCE_CONFLUENCE,
+    SHADOW_SOURCE_DISCOVERY,
+    SHADOW_SOURCE_GATE,
+    SHADOW_STATUS_CLOSED,
+    SHADOW_STATUS_OPEN,
+    ShadowEntry,
+)
+from .shadow_operations import (
+    close_shadow_entry,
+    get_open_shadow_entries,
+    get_shadow_entries,
+    has_open_shadow,
+    mark_shadow_entry,
+    record_shadow_entry,
+    shadow_ref_ids,
+    shadow_summary,
 )
 from .insight_models import (
     FINDING_INSIDER_CLUSTER,
@@ -211,6 +230,7 @@ __all__ = [
     "LearningEvent",
     "LEARNING_KIND_OUTCOME",
     "LEARNING_KIND_ACCURACY_MODIFIER",
+    "LEARNING_KIND_SHADOW_OUTCOME",
     "LEARNING_KIND_WEIGHT_ADAPTATION",
     "record_learning_event",
     "record_thesis_outcome",
@@ -219,6 +239,21 @@ __all__ = [
     "outcome_exists_for_date",
     "accuracy_stats_for_symbol",
     "outcome_metrics",
+    # Shadow ledger (considered-but-not-traded theses)
+    "ShadowEntry",
+    "SHADOW_SOURCE_CONFLUENCE",
+    "SHADOW_SOURCE_DISCOVERY",
+    "SHADOW_SOURCE_GATE",
+    "SHADOW_STATUS_OPEN",
+    "SHADOW_STATUS_CLOSED",
+    "record_shadow_entry",
+    "has_open_shadow",
+    "shadow_ref_ids",
+    "get_open_shadow_entries",
+    "get_shadow_entries",
+    "mark_shadow_entry",
+    "close_shadow_entry",
+    "shadow_summary",
     # Confluence / insight engine
     "ConfluenceFinding",
     "FINDING_INSIDER_CLUSTER",

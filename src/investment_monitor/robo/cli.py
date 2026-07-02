@@ -384,6 +384,25 @@ def thesis_run(
         if promoted:
             typer.echo(f"Promoted {len(promoted)} new name(s): {', '.join(promoted)}")
 
+    # 1.5 Shadow ledger: sweep gate-rejects + discovery near-misses into the ledger,
+    #     mark open counterfactuals, close those past horizon. Fail-open bookkeeping.
+    try:
+        from investment_monitor.robo.shadow import maintain_shadow_ledger
+
+        with get_session() as session:
+            sh = maintain_shadow_ledger(
+                session,
+                score_floor=float(auto_cfg.autonomy.score_floor),
+                account_id=acct,
+            )
+        if any(sh.values()):
+            typer.echo(
+                f"Shadow ledger: +{sh['gate']} gate, +{sh['discovery']} discovery, "
+                f"{sh['marked']} marked, {sh['closed']} closed"
+            )
+    except Exception as exc:  # noqa: BLE001 - shadow bookkeeping must never block a run
+        typer.secho(f"shadow ledger maintenance skipped: {exc}", fg=typer.colors.YELLOW)
+
     # 2. Maintain existing theses (deterministic invalidation, then LLM re-eval).
     if not skip_maintenance:
         actions = {"invalidated": 0, "updated": 0, "unchanged": 0}
@@ -668,6 +687,56 @@ def learning(
                 f"{sym:<8} {st['n']:>4} {st['hit_rate'] * 100:>5.0f}% "
                 f"{st['ewma_hit_rate'] * 100:>5.0f}% {1.0 - st['brier']:>6.2f}"
             )
+
+
+@app.command("shadow")
+def shadow(
+    limit: int = typer.Option(15, "--limit", help="Open entries to list"),
+    evaluate: bool = typer.Option(
+        False, "--evaluate", help="Run a maintenance pass (sync + mark/close) first"
+    ),
+) -> None:
+    """Traded vs skipped: how the theses we did NOT take are performing.
+
+    The shadow ledger tracks every considered-but-skipped thesis (promotion floor,
+    caps, liquidity/run-up guards, gate rejects) at its skip-day price, so the skip
+    policy itself gets a report card next to the real-money outcomes.
+    """
+    from investment_monitor.robo.shadow import maintain_shadow_ledger, shadow_report
+    from investment_monitor.storage import SHADOW_STATUS_OPEN, get_shadow_entries
+
+    settings = get_settings()
+    init_db(settings.db_path)
+    with get_session() as session:
+        if evaluate:
+            maintain_shadow_ledger(session)
+        report = shadow_report(session)
+        entries = get_shadow_entries(session, status=SHADOW_STATUS_OPEN, limit=limit)
+
+        real = report["real"]
+        if real["n"]:
+            typer.echo(
+                f"real outcomes: n={real['n']}  hit {real['hit_rate'] * 100:.0f}%  "
+                f"avg {real['avg_return'] * 100:+.1f}%"
+            )
+        else:
+            typer.echo("real outcomes: none recorded yet")
+        for source, st in sorted(report["shadow"].items()):
+            hit = f"{st['hit_rate'] * 100:.0f}%" if st["hit_rate"] is not None else "—"
+            avg = f"{st['avg_return'] * 100:+.1f}%" if st["avg_return"] is not None else "—"
+            mark = f"{st['open_mark'] * 100:+.1f}%" if st["open_mark"] is not None else "—"
+            typer.echo(
+                f"shadow[{source}]: open {st['open']} (mark {mark})  "
+                f"closed {st['closed']}  hit {hit}  avg {avg}"
+            )
+        if entries:
+            typer.echo(f"\n{'symbol':<8} {'source':<12} {'reason':<20} {'entry':>8} {'mark':>7}")
+            for e in entries:
+                mark = f"{e.realized_return * 100:+.1f}%" if e.realized_return is not None else "—"
+                price = f"${e.entry_price:,.2f}" if e.entry_price else "—"
+                typer.echo(
+                    f"{e.symbol:<8} {e.source:<12} {e.skip_reason:<20} {price:>8} {mark:>7}"
+                )
 
 
 @app.command("prune")
