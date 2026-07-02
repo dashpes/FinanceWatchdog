@@ -689,6 +689,33 @@ def learning(
             )
 
 
+@app.command("sentinel")
+def sentinel(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+) -> None:
+    """Intraday watchdog over open positions: invalidate/flag only, never buy.
+
+    No-op outside regular trading hours, so an hourly timer needs no market-
+    calendar logic. A tripped invalidation zeroes the thesis; the actual sell
+    happens at the next scheduled, fully-gated trade run.
+    """
+    from investment_monitor.robo.sentinel import run_sentinel
+
+    settings = get_settings()
+    cfg = _load_config(config)
+    init_db(settings.db_path)
+    result = run_sentinel(settings, cfg)
+    if result["status"] == "market_closed":
+        typer.echo("Market closed — sentinel pass skipped.")
+        return
+    typer.echo(
+        f"Sentinel: {result['checked']} position(s) checked, "
+        f"{len(result['tripped'])} invalidated, {len(result['flagged'])} flagged"
+    )
+    for line in result["tripped"] + result["flagged"]:
+        typer.echo(f"  - {line}")
+
+
 @app.command("shadow")
 def shadow(
     limit: int = typer.Option(15, "--limit", help="Open entries to list"),

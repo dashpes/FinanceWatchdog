@@ -38,6 +38,7 @@ writes the result into `/etc/systemd/system/`.
 | `financewatchdog-research.service` | long-running | continuous (self-limits 18:00–06:00) | overnight data gather + confluence + thesis scoring (never trades) |
 | `financewatchdog-dashboard.service` | long-running | always on | Archie's web GUI on the LAN — `http://<pi>.local` |
 | `financewatchdog-trade.timer` | timer → oneshot | Mon–Fri 07:00 & 12:30 | `thesis-run` (gated by dry-run + kill-switch) |
+| `financewatchdog-sentinel.timer` | timer → oneshot | Mon–Fri hourly 06:35–12:35 | intraday watchdog on held names (flag/invalidate only, never buys) |
 | `financewatchdog-summary.timer` | timer → oneshot | Mon–Fri 13:15 | `daily-summary` email |
 | `financewatchdog-prune.timer` | timer → oneshot | Sun 12:00 | retention prune + `VACUUM` |
 | `financewatchdog-autoupdate.timer` | timer → oneshot | daily 06:15 | update to the latest **release tag**, restart units |

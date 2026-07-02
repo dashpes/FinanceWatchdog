@@ -1,0 +1,14 @@
+[Unit]
+Description=FinanceWatchdog robo — intraday sentinel schedule (hourly during market hours)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Times are LOCAL (Pi timezone is America/Los_Angeles; RTH is 06:30-13:00 PT).
+# :35 offsets avoid the 07:00/12:30 trade runs (the shared run-lock would skip
+# an overlap anyway). The sentinel itself is a no-op when the market is closed,
+# so holidays/half-days need no calendar logic here.
+OnCalendar=Mon-Fri 06,07,08,09,10,11,12:35
+Persistent=false
+
+[Install]
+WantedBy=timers.target
