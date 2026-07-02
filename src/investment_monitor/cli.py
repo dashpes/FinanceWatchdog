@@ -169,6 +169,32 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             for r in results:
                 print(str(r))
+        # Label fresh ticker-tagged headlines bullish/bearish/neutral with the cheap
+        # triage model, so confluence can drop bearish items from long-side
+        # corroboration. Fail-open: no Ollama just leaves sentiment NULL.
+        try:
+            import asyncio as _asyncio
+
+            from investment_monitor.analysis.local_llm import LocalLLM
+            from investment_monitor.analysis.model_router import ModelRouter
+            from investment_monitor.analysis.news_processor import (
+                classify_unscored_sentiment,
+            )
+            from investment_monitor.config import get_settings
+            from investment_monitor.storage import get_session
+
+            settings = get_settings()
+            llm = LocalLLM(
+                model=ModelRouter(settings).resolve("triage", base_url=settings.ollama_host),
+                base_url=settings.ollama_host,
+            )
+            with get_session() as session:
+                labeled = _asyncio.run(classify_unscored_sentiment(session, llm))
+            if labeled and not args.quiet:
+                print(f"sentiment: labeled {labeled} headlines")
+        except Exception as e:  # noqa: BLE001 - sentiment must not fail collection
+            print(f"sentiment labeling warning: {e}", file=sys.stderr)
+
         # Full pipeline: after collecting, detect cross-source confluence and promote
         # the strongest findings to theses so the autonomous advisor trades them.
         try:

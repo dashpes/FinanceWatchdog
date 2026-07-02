@@ -259,9 +259,12 @@ def gather_news_evidence(
 ) -> list[Evidence]:
     """News-flow Evidence — a weak THIRD source — for insider-active tickers.
 
-    Non-directional: a burst of recent headlines on a name that insiders are buying is
-    corroborating attention, not a buy/sell signal. Requires >= ``min_items`` recent
-    headlines to count, so a single stray article doesn't manufacture a source.
+    Mostly non-directional: a burst of recent headlines on a name that insiders are
+    buying is corroborating attention, not a buy/sell signal. Requires >= ``min_items``
+    recent headlines to count, so a single stray article doesn't manufacture a source.
+    Bearish-labeled items (see ``classify_unscored_sentiment``) are excluded — a burst
+    of bad news must never corroborate a LONG thesis; unlabeled items still count as
+    neutral attention.
     """
     # Score news by PUBLICATION time, so a backfill/re-ingest of weeks-old articles
     # (created_at = now, published_at = stale) can't masquerade as fresh corroboration
@@ -276,17 +279,21 @@ def gather_news_evidence(
             # actually PUBLISHED within the window. We over-fetch (drop the hours
             # bound's recency role) because created_at recency is not what gates here.
             items = get_recent_news(session, ticker=ticker, hours=window_days * 24)
-            pub_dates = [
-                i.published_at.date()
-                for i in items
+            kept = [
+                i for i in items
                 if i.published_at and i.published_at.date() >= published_cutoff
+                and (i.sentiment or "").lower() != "bearish"
             ]
-            if len(pub_dates) < min_items:
+            if len(kept) < min_items:
                 continue
+            pub_dates = [i.published_at.date() for i in kept]
+            n_bullish = sum(1 for i in kept if (i.sentiment or "").lower() == "bullish")
             latest = max(pub_dates)
             out.append(Evidence(
                 ticker=ticker, source="news", actor="news_flow", date=latest,
-                value=None, detail=f"{len(pub_dates)} recent headlines",
+                value=None,
+                detail=f"{len(kept)} recent headlines"
+                       + (f" ({n_bullish} bullish)" if n_bullish else ""),
             ))
         except Exception as exc:  # noqa: BLE001 - news is best-effort context
             logger.debug(f"news evidence failed for {ticker}: {exc}")
