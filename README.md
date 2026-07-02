@@ -221,6 +221,47 @@ docker-compose logs -f
 docker-compose exec monitor investment-monitor --type regular
 ```
 
+### Option C: Raspberry Pi robo advisor (one-line install + auto-update)
+
+The autonomous robo advisor ships as a self-contained Pi deployment (Debian/systemd,
+ARM64). One line provisions everything — a dedicated service user, venv + lockfile, Ollama
+with RAM guardrails, the systemd bundle, and a credential wizard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dashpes/FinanceWatchdog/main/scripts/install.sh | sudo bash
+```
+
+For a **private repo** (or to manage the code yourself), clone/scp it to `/opt/financewatchdog`
+first and run `sudo FW_NO_CLONE=1 FW_USER=$USER bash scripts/install.sh`. Details:
+`systemd/pi/README.md`. Trading stays in **dry-run** until you set `ROBO_FORCE_DRY_RUN=false`
+in `.env` **and** `dry_run: false` in `config/robo.yaml`.
+
+#### Update pipeline (tag-gated, not `main`)
+
+A deployed Pi runs `financewatchdog-autoupdate.timer` **daily at 06:15 local**, which runs
+`scripts/auto_update.sh`. It deploys the **latest strict-semver git tag** (`vX.Y.Z`) — **not
+raw `main`**. So a commit to `main` never auto-reaches a box trading real money until you cut
+a release tag. To ship an update:
+
+```bash
+# 1. merge your change to main (via PR)
+# 2. cut the release tag — THIS is what the Pi pulls:
+git tag v0.1.2 && git push origin v0.1.2
+# the Pi applies it at the next 06:15, or trigger it immediately:
+ssh <user>@<pi> 'cd /opt/financewatchdog && scripts/auto_update.sh --restart'
+```
+
+Each `auto_update.sh` run: `git fetch --tags` → resolve the newest `vX.Y.Z` (pre-releases like
+`-rc1` excluded) → no-op if already on it, else `git checkout --force <tag>` → reinstall deps
+(network-resilient pip, from `requirements.lock` when present) → **on a dependency failure it
+rolls back and does NOT restart** (never a half-updated trader) → restart the robo units.
+
+Caveats:
+- **systemd unit / schedule changes are not auto-applied** — re-run `sudo bash scripts/install.sh`
+  (the updater logs a `NOTE` when a release touches `systemd/pi/`).
+- Git-based auto-update needs the Pi to have **read access to the repo** (a GitHub deploy key);
+  without it the installer leaves the timer off and you update by re-copying + reinstalling.
+
 ### Schedule Overview
 
 | Schedule | Command | Purpose |
