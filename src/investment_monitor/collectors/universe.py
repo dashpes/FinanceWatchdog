@@ -55,6 +55,16 @@ class UniverseCollector(BaseCollector):
         self._collect_sp500 = collect_sp500
         self._collect_nasdaq100 = collect_nasdaq100
 
+    def _user_agent(self) -> str:
+        """Wikipedia-policy-compliant User-Agent: descriptive app + a real contact.
+
+        Wikipedia BLOCKS spoofed/generic browser agents (the old fake-Chrome string got
+        403'd). Per https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy the UA
+        must identify the tool and a contact; we reuse sec_contact_email (blank -> generic).
+        """
+        contact = (self.config.sec_contact_email or "").strip() or "contact@financewatchdog.app"
+        return f"FinanceWatchdog/1.0 (https://github.com/dashpes/FinanceWatchdog; {contact})"
+
     async def _fetch_url(self, url: str) -> str:
         """
         Fetch content from a URL with proper headers.
@@ -69,13 +79,10 @@ class UniverseCollector(BaseCollector):
             httpx.HTTPStatusError: If request fails
         """
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/91.0.4472.124 Safari/537.36"
-            )
+            "User-Agent": self._user_agent(),
+            "Accept": "text/html,application/xhtml+xml",
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             return response.text

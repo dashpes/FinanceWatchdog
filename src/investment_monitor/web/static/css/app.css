@@ -1,0 +1,419 @@
+/* Archie · Personal Private Equity — the firm's stationery, as a stylesheet.
+   Two papers: "Paper" (ivory, default light) and "The Study" (green-black dark).
+   Letterpress discipline: hairline rules, no shadows, no rounded chrome, serif
+   throughout, brass used sparingly for wayfinding. */
+
+:root {
+  --paper: #f4efe3;
+  --paper-raised: #fbf7ec;
+  --ink: #1f2b25;
+  --ink-muted: #61695f;
+  --green: #1e3a2f;
+  --navy: #17253b;
+  --brass: #a9852f;
+  --brass-bright: #8a6c24;
+  --hairline: #d8cdb4;
+  --hairline-strong: #b9ac8b;
+  --gain: #2e6b4f;
+  --loss: #8c3b2e;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  --body: Georgia, "Times New Roman", serif;
+}
+
+[data-theme="study"] {
+  --paper: #121b16;
+  --paper-raised: #18241e;
+  --ink: #e9e2cf;
+  --ink-muted: #9aa294;
+  --green: #cfe3d6;
+  --navy: #c6d3e8;
+  --brass: #c29b45;
+  --brass-bright: #d8b25e;
+  --hairline: #2c3a31;
+  --hairline-strong: #45564a;
+  --gain: #6fae8f;
+  --loss: #c9705f;
+}
+
+* { box-sizing: border-box; }
+
+html { height: 100%; }
+
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+a { color: var(--brass-bright); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 2px;
+}
+
+/* ---- masthead ------------------------------------------------------------ */
+
+.masthead {
+  text-align: center;
+  padding: 26px 16px 0;
+}
+
+.masthead .wordmark {
+  font-family: var(--serif);
+  font-size: 26px;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em; /* re-centres letterspaced caps */
+  color: var(--green);
+  text-transform: uppercase;
+}
+
+.masthead .firm {
+  font-family: var(--serif);
+  font-size: 11px;
+  letter-spacing: 0.34em;
+  text-indent: 0.34em;
+  color: var(--brass);
+  text-transform: uppercase;
+  margin-top: 6px;
+}
+
+.masthead .rule {
+  max-width: 1060px;
+  margin: 16px auto 0;
+  border-top: 1px solid var(--hairline-strong);
+  border-bottom: 1px solid var(--hairline);
+  height: 3px;
+}
+
+/* ---- navigation ----------------------------------------------------------- */
+
+nav.folio {
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 10px 16px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 18px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+nav.folio a {
+  font-family: var(--serif);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  padding: 6px 2px 8px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+nav.folio a.active {
+  color: var(--ink);
+  border-bottom-color: var(--brass);
+}
+
+nav.folio .spacer { flex: 1; }
+
+nav.folio .toggles {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+button.plain {
+  font-family: var(--serif);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  background: none;
+  border: 1px solid var(--hairline-strong);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button.plain:hover { color: var(--ink); border-color: var(--brass); }
+button.plain[aria-pressed="true"] { color: var(--brass-bright); border-color: var(--brass); }
+
+/* ---- page frame ------------------------------------------------------------ */
+
+main {
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 24px 16px 80px;
+}
+
+h1.page-title {
+  font-family: var(--serif);
+  font-weight: normal;
+  font-style: italic;
+  font-size: 24px;
+  margin: 6px 0 18px;
+  color: var(--green);
+}
+
+/* ---- the letter (Archie's plain-English note; the page's signature) --------- */
+
+.letter {
+  max-width: 62ch;
+  margin: 0 0 26px;
+  font-size: 16px;
+}
+
+.letter p { margin: 0 0 10px; }
+.letter .salutation { font-style: italic; }
+.letter b, .letter strong { color: var(--green); font-weight: 600; }
+[data-theme="study"] .letter b, [data-theme="study"] .letter strong { color: var(--brass-bright); }
+
+/* ---- summary cards ----------------------------------------------------------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1px;
+  background: var(--hairline);
+  border: 1px solid var(--hairline);
+  margin-bottom: 30px;
+}
+
+.card {
+  background: var(--paper-raised);
+  padding: 14px 16px 12px;
+}
+
+.card .k {
+  font-family: var(--serif);
+  font-size: 10.5px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.card .v {
+  font-family: var(--serif);
+  font-size: 24px;
+  margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.card .sub { font-size: 12px; color: var(--ink-muted); margin-top: 2px; }
+
+/* ---- sections + ledger tables --------------------------------------------------- */
+
+section.ledger { margin: 34px 0; }
+
+.section-label {
+  font-family: var(--serif);
+  font-size: 11.5px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--brass-bright);
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--hairline-strong);
+  box-shadow: 0 3px 0 -2px var(--hairline); /* the double ledger rule */
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.section-label .note {
+  letter-spacing: normal;
+  text-transform: none;
+  font-style: italic;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+table.sheet {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 13.5px;
+}
+
+table.sheet th {
+  font-family: var(--serif);
+  font-weight: normal;
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  text-align: left;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+table.sheet td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+}
+
+table.sheet td.num, table.sheet th.num { text-align: right; }
+table.sheet tr:hover td { background: var(--paper-raised); }
+table.sheet .sym { font-family: var(--serif); font-weight: 600; }
+table.sheet td.why { font-style: italic; color: var(--ink-muted); }
+
+.gain { color: var(--gain); }
+.loss { color: var(--loss); }
+.muted { color: var(--ink-muted); }
+.small { font-size: 12px; }
+
+/* status chips: typeset stamps, not pills */
+.chip {
+  display: inline-block;
+  font-family: var(--serif);
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  border: 1px solid var(--hairline-strong);
+  padding: 1px 7px;
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.chip.ok    { color: var(--gain); border-color: var(--gain); }
+.chip.warn  { color: var(--brass-bright); border-color: var(--brass); }
+.chip.bad   { color: var(--loss); border-color: var(--loss); }
+
+/* ---- appendix (advanced) ---------------------------------------------------------- */
+
+details.appendix { margin: 22px 0; }
+
+details.appendix > summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--serif);
+  font-size: 11.5px;
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--hairline-strong);
+}
+
+details.appendix > summary::before { content: "§ "; color: var(--brass); }
+details.appendix > summary:hover { color: var(--ink); }
+details.appendix[open] > summary { color: var(--brass-bright); }
+
+body[data-advanced="off"] .advanced-only { display: none; }
+
+/* ---- charts ------------------------------------------------------------------------- */
+
+.chart {
+  width: 100%;
+  height: 320px;
+  margin-top: 10px;
+}
+
+.chart.tall { height: 440px; }
+
+/* ---- narrative prose (thesis detail) -------------------------------------------------- */
+
+.prose {
+  max-width: 68ch;
+  font-size: 15.5px;
+}
+
+.prose p { margin: 0 0 12px; }
+
+blockquote.narrative {
+  margin: 10px 0;
+  padding: 2px 0 2px 18px;
+  border-left: 2px solid var(--brass);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+dl.conditions { margin: 8px 0; font-size: 13.5px; }
+dl.conditions dt {
+  font-family: var(--serif);
+  font-size: 10.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-top: 10px;
+}
+dl.conditions dd { margin: 2px 0 0; font-variant-numeric: tabular-nums; }
+
+/* ---- forms (settings, controls) --------------------------------------------------------- */
+
+.field { display: grid; grid-template-columns: minmax(220px, 1.2fr) 1fr auto; gap: 12px; align-items: start; padding: 12px 4px; border-bottom: 1px solid var(--hairline); }
+.field .name { font-family: var(--serif); font-size: 14px; }
+.field .desc { font-size: 12px; color: var(--ink-muted); margin-top: 2px; max-width: 52ch; }
+.field .range { font-size: 11.5px; color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+
+input[type="text"], input[type="number"], input[type="password"], select {
+  font-family: var(--body);
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--paper-raised);
+  border: 1px solid var(--hairline-strong);
+  padding: 5px 8px;
+  min-width: 130px;
+}
+
+button.act {
+  font-family: var(--serif);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--paper-raised);
+  background: var(--green);
+  border: 1px solid var(--green);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button.act:hover { background: var(--navy); border-color: var(--navy); }
+button.act.danger { background: var(--loss); border-color: var(--loss); }
+button.act:disabled { opacity: 0.5; cursor: default; }
+
+[data-theme="study"] button.act { color: #121b16; }
+
+.flash { font-size: 13px; margin: 8px 0; font-style: italic; }
+.flash.ok { color: var(--gain); }
+.flash.err { color: var(--loss); }
+
+/* status ribbon under nav */
+.ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  padding: 10px 0 0;
+}
+
+/* footer colophon */
+footer.colophon {
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 20px 16px 40px;
+  border-top: 1px solid var(--hairline);
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* jargon help */
+abbr[title] { text-decoration: underline dotted var(--brass); cursor: help; }
+
+@media (max-width: 720px) {
+  .field { grid-template-columns: 1fr; }
+  .masthead .wordmark { font-size: 20px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  nav.folio a, button.plain, button.act { transition: color 120ms ease, border-color 120ms ease, background 120ms ease; }
+}

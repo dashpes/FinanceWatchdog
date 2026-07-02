@@ -30,7 +30,8 @@ from investment_monitor.robo.notify import (
     notify_run,
     send_daily_summary,
     send_test,
-    todays_trade_lines,
+    todays_trade_rows,
+    trade_text_lines,
 )
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.storage import (
@@ -568,9 +569,17 @@ def daily_summary(
     except Exception as exc:  # noqa: BLE001 - realized P&L is best-effort, never required
         typer.secho(f"(realized P&L unavailable: {exc})", fg=typer.colors.YELLOW)
 
-    trades = todays_trade_lines(settings)
+    trade_rows = todays_trade_rows(settings)
+    trades = trade_text_lines(trade_rows)
     typer.echo(format_daily_summary(account, realized, trades))
-    sent = send_daily_summary(settings, account, realized, trades)
+    sent = send_daily_summary(
+        settings,
+        account,
+        realized,
+        trades,
+        trade_rows=trade_rows,
+        dry_run=settings.robo_force_dry_run or cfg.dry_run,
+    )
     if notifications_configured(settings) and not sent:
         typer.secho(
             "(summary not sent — check notification config / logs)",
@@ -604,7 +613,35 @@ def notify_test() -> None:
         )
         typer.secho(f"Failed to send {channel}. {hint}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
-        raise typer.Exit(code=1)
+
+
+@app.command("pause")
+def pause(
+    reason: str = typer.Option("", "--reason", "-r", help="Why trading is paused."),
+) -> None:
+    """Pause trading (the next trade runs record 'paused' and skip the broker).
+
+    Research, discovery, and data collection keep running. Resume with
+    `investment-robo resume`. The dashboard uses the same control file.
+    """
+    from investment_monitor.robo import control
+
+    state = control.set_paused(get_settings().db_path, True, reason=reason, updated_by="cli")
+    suffix = f" ({state.reason})" if state.reason else ""
+    typer.secho(f"Trading PAUSED{suffix}. Resume with: investment-robo resume", fg=typer.colors.YELLOW)
+
+
+@app.command("resume")
+def resume() -> None:
+    """Resume trading after a pause. (Never arms live mode by itself.)"""
+    from investment_monitor.robo import control
+
+    settings = get_settings()
+    control.set_paused(settings.db_path, False, updated_by="cli")
+    state = control.load_control(settings.db_path)
+    typer.secho("Trading resumed.", fg=typer.colors.GREEN)
+    if state.force_dry_run or settings.robo_force_dry_run:
+        typer.echo("Note: paper mode is still forced (control file / ROBO_FORCE_DRY_RUN).")
 
 
 @app.command("learning")

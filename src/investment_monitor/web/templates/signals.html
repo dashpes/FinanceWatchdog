@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Signals{% endblock %}
+{% block content %}
+<h1 class="page-title">Signals of Note</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Reading the wires…</i></p></div>
+
+<section class="ledger">
+  <div class="section-label">Confluence Findings
+    <span class="note">
+      <select id="kind-filter">
+        <option value="">every kind</option>
+        <option value="insider_cluster">insider clusters</option>
+        <option value="multi_source">multi-source</option>
+      </select>
+      <select id="days-filter">
+        <option value="7">last week</option>
+        <option value="30" selected>last month</option>
+        <option value="90">last quarter</option>
+      </select>
+    </span>
+  </div>
+  <table class="sheet">
+    <thead><tr>
+      <th>Ticker</th><th>Kind</th>
+      <th class="num"><abbr title="Confluence strength — grows with distinct actors and distinct sources">Score</abbr></th>
+      <th class="num advanced-only">Actors</th><th class="num advanced-only">Sources</th>
+      <th class="num">Value</th><th class="num">Since</th><th>The story</th>
+    </tr></thead>
+    <tbody id="findings"></tbody>
+  </table>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Insider Dealings <span class="note"><input type="text" id="insider-ticker" placeholder="ticker…" size="8"></span></div>
+  <table class="sheet">
+    <thead><tr>
+      <th>Ticker</th><th>Filed</th><th>Insider</th><th>Role</th>
+      <th class="num">Shares</th><th class="num">Price</th><th class="num">Value</th><th class="advanced-only">SEC</th>
+    </tr></thead>
+    <tbody id="insiders"></tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/signals.js"></script>
+{% endblock %}

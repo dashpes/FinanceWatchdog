@@ -36,6 +36,9 @@ ENV/
 config/*.yaml
 !config/*.yaml.example
 data/*.db
+# Runtime state written by the robo/dashboard (learned blocklist, pause/kill control)
+data/robo_blocklist.json
+data/robo_control.json
 logs/*.log
 logs/*.jsonl
 

@@ -55,6 +55,7 @@ dev = [
 investment-monitor = "investment_monitor.cli:main"
 investment-research = "investment_monitor.research_cli:main"
 investment-robo = "investment_monitor.robo.cli:main"
+investment-dashboard = "investment_monitor.web.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_monitor"]

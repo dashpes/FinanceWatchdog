@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Ledger{% endblock %}
+{% block content %}
+<h1 class="page-title">The Ledger</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Balancing the books…</i></p></div>
+
+<section class="ledger">
+  <div class="section-label">Realised P&amp;L by Name <span class="note">from the robo's own closed trades only</span></div>
+  <table class="sheet" style="max-width:520px">
+    <thead><tr><th>Name</th><th class="num">Realised</th><th class="num advanced-only">Still held (reconstructed)</th></tr></thead>
+    <tbody id="pnl"></tbody>
+  </table>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Orders
+    <span class="note">
+      <input type="text" id="symbol-filter" placeholder="symbol…" size="8">
+      <select id="side-filter"><option value="">buys &amp; sells</option><option value="buy">buys</option><option value="sell">sells</option></select>
+      <label class="small"><input type="checkbox" id="placed-only"> executed only</label>
+    </span>
+  </div>
+  <table class="sheet">
+    <thead><tr>
+      <th>When</th><th>Side</th><th>Symbol</th><th class="num">Size</th><th class="num">Fill</th>
+      <th><abbr title="The deterministic guardrail's verdict on the proposed order">Gate</abbr></th>
+      <th>Archie's note</th>
+    </tr></thead>
+    <tbody id="orders"></tbody>
+  </table>
+</section>
+
+<details class="appendix">
+  <summary>Appendix — Run History</summary>
+  <table class="sheet">
+    <thead><tr>
+      <th>Started</th><th>Status</th><th>Mode</th><th>Source</th>
+      <th class="num">Proposed</th><th class="num">Accepted</th><th class="num">Rejected</th><th class="num">Placed</th>
+      <th class="num">Value</th>
+    </tr></thead>
+    <tbody id="runs"></tbody>
+  </table>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/trades.js"></script>
+{% endblock %}

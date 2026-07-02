@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+<h1 class="page-title">The Morning Ledger</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Fetching the books…</i></p></div>
+
+<div class="cards" id="cards"></div>
+
+<section class="ledger">
+  <div class="section-label">Equity Curve <span class="note">portfolio value by day, from the firm's own run records</span></div>
+  <div class="chart" id="equity-chart"></div>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Today's Dealings</div>
+  <table class="sheet">
+    <thead><tr><th>Side</th><th>Symbol</th><th class="num">Size</th><th class="num">Fill</th><th>Archie's note</th></tr></thead>
+    <tbody id="dealings"></tbody>
+  </table>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Holdings</div>
+  <table class="sheet">
+    <thead><tr>
+      <th>Holding</th><th class="num">Shares</th><th class="num">Price</th><th class="num">Value</th>
+      <th class="num">Weight</th><th class="num">Unrealised</th><th class="num advanced-only">Return</th>
+    </tr></thead>
+    <tbody id="holdings"></tbody>
+  </table>
+</section>
+
+<details class="appendix">
+  <summary>Appendix — Exposures &amp; Concentration</summary>
+  <div class="cards" id="exposure-cards" style="margin-top:12px"></div>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/overview.js"></script>
+{% endblock %}
