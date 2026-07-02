@@ -65,12 +65,15 @@ git checkout -q --force "$TARGET_REF"
 # then restarts the trader onto a broken venv is the "half-updated box" we must avoid.
 set +e
 install_ok=1
+# Network-resilient pip: a Pi update often competes with model downloads for bandwidth
+# (SSL-EOF / read-timeouts on piwheels), so retry hard, extend the timeout, prefer wheels.
+PIP_NET="--retries 10 --timeout 120 --prefer-binary"
 if [ -f requirements.lock ]; then
   log "Installing from requirements.lock"
-  .venv/bin/pip install --quiet -r requirements.lock 2>&1 | tee -a "$LOG_FILE"
+  .venv/bin/pip install --quiet $PIP_NET -r requirements.lock 2>&1 | tee -a "$LOG_FILE"
   [ "${PIPESTATUS[0]}" -eq 0 ] || install_ok=0
 fi
-.venv/bin/pip install --quiet -e ".[ai,notifications,robo]" 2>&1 | tee -a "$LOG_FILE"
+.venv/bin/pip install --quiet $PIP_NET -e ".[ai,notifications,robo]" 2>&1 | tee -a "$LOG_FILE"
 [ "${PIPESTATUS[0]}" -eq 0 ] || install_ok=0
 set -e
 

@@ -7,7 +7,8 @@
 # It is idempotent — re-running updates an existing install in place. It:
 #   1. apt-installs Python + git + a build-tool safety net (for ARM wheel gaps)
 #   2. installs Ollama and applies the RAM guardrails (one model resident at a time)
-#   3. pulls the models (phi3:mini, nomic-embed-text, qwen2.5:14b)
+#   3. pulls the models (phi3:mini, nomic-embed-text, qwen2.5:14b) IN THE BACKGROUND, so
+#      the multi-GB 14B download doesn't hold up the install (services fail-open until ready)
 #   4. creates a dedicated `financewatchdog` service user + /opt/financewatchdog
 #   5. clones the repo at the latest RELEASE tag and builds the venv (+ a lockfile)
 #   6. renders and enables the systemd bundle (research loop + trade/summary/prune/
@@ -19,6 +20,7 @@
 #   FW_HOME=/opt/financewatchdog  FW_USER=financewatchdog  FW_TZ=America/Los_Angeles
 #   FW_REPO=https://github.com/dashpes/FinanceWatchdog.git  FW_REF=<tag/branch>  FW_SKIP_INIT=1
 #   FW_NO_CLONE=1   # you already placed the code at FW_HOME (git clone or scp) — don't clone
+#   FW_MODELS=""    # skip model pulls (default: phi3:mini nomic-embed-text qwen2.5:14b, in bg)
 #
 # PRIVATE REPO / managing the code yourself: clone or scp the repo to FW_HOME first, then run
 # with FW_NO_CLONE=1 (the installer never needs its own repo credentials). For git auto-update
@@ -32,7 +34,7 @@ FW_USER="${FW_USER:-financewatchdog}"
 FW_TZ="${FW_TZ:-America/Los_Angeles}"
 FW_REPO="${FW_REPO:-https://github.com/dashpes/FinanceWatchdog.git}"
 FW_REF="${FW_REF:-}"   # blank => latest semver tag (falls back to default branch)
-FW_MODELS="${FW_MODELS:-phi3:mini nomic-embed-text qwen2.5:14b}"
+FW_MODELS="${FW_MODELS-phi3:mini nomic-embed-text qwen2.5:14b}"   # FW_MODELS="" skips pulls
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*" >&2; }
@@ -78,11 +80,31 @@ EOF
 "$SYSTEMCTL" daemon-reload
 "$SYSTEMCTL" enable --now ollama 2>/dev/null || "$SYSTEMCTL" restart ollama || true
 
-say "Pulling models ($FW_MODELS) — this can take a while on first install"
-for m in $FW_MODELS; do
-  say "  ollama pull $m"
-  ollama pull "$m" || warn "could not pull $m (you can pull it later)"
-done
+mkdir -p "$FW_HOME/logs"
+PULL_LOG="$FW_HOME/logs/ollama-pull.log"
+if [ -z "${FW_MODELS// /}" ]; then
+  say "Skipping model pulls (FW_MODELS empty)"
+else
+  # Skip models already downloaded (normalise the implicit :latest tag), then pull any
+  # missing ones in the BACKGROUND so a multi-GB download doesn't block the install.
+  present="$(ollama list 2>/dev/null | awk 'NR>1{sub(/:latest$/,"",$1); print $1}')"
+  to_pull=""
+  for m in $FW_MODELS; do
+    if printf '%s\n' "$present" | grep -qxF "${m%:latest}"; then
+      say "  $m already present"
+    else
+      to_pull="$to_pull $m"
+    fi
+  done
+  if [ -z "${to_pull// /}" ]; then
+    say "All requested models already present"
+  else
+    say "Pulling models in the BACKGROUND ($to_pull ) — progress: tail -f $PULL_LOG"
+    nohup bash -c "for m in$to_pull; do ollama pull \"\$m\" || echo \"WARN: could not pull \$m\"; done" \
+      </dev/null >>"$PULL_LOG" 2>&1 &
+    disown
+  fi
+fi
 
 say "Placing the app in $FW_HOME"
 # MANAGED=1 means the installer owns the git checkout (it can fetch + pin a release tag).
@@ -131,8 +153,14 @@ say "Building the virtualenv"
 if [ ! -d "$FW_HOME/.venv" ]; then
   sudo -u "$FW_USER" python3 -m venv "$FW_HOME/.venv"
 fi
-sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install --quiet --upgrade pip
-sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install --quiet -e "$FW_HOME[ai,notifications,robo]"
+# Network-resilient pip: a Pi install often competes with multi-GB Ollama model
+# downloads for bandwidth, which caused SSL-EOF / read-timeout failures on piwheels.
+# Retry hard, extend the timeout, prefer prebuilt wheels, and never let a failed pip
+# self-upgrade abort the install (the venv's bundled pip is fine).
+PIP_NET="--retries 10 --timeout 120 --prefer-binary"
+sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install --quiet $PIP_NET --upgrade pip \
+  || warn "pip self-upgrade skipped (using the venv's bundled pip)"
+sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install $PIP_NET -e "$FW_HOME[ai,notifications,robo]"
 # Pin the exact resolved set so auto-updates on this box are reproducible (solves ARM
 # wheel drift: the lock is built here, against this Pi's Python/arch). --exclude-editable
 # keeps the app itself out of the lock (it is reinstalled with `-e` separately).
@@ -194,6 +222,8 @@ echo "AND dry_run: false in $FW_HOME/config/robo.yaml. Useful checks:"
 echo "  systemctl list-timers 'financewatchdog-*'"
 echo "  sudo -u $FW_USER $FW_HOME/.venv/bin/investment-robo check-safety --config $FW_HOME/config"
 echo "  journalctl -u financewatchdog-research -f"
+echo "Model downloads may still be finishing in the background:"
+echo "  tail -f $FW_HOME/logs/ollama-pull.log   (or: ollama list)"
 
 # If a copied .env/robo.yaml already arms live trading, warn about the two-bots-one-account trap.
 if grep -qE '^[[:space:]]*ROBO_FORCE_DRY_RUN[[:space:]]*=[[:space:]]*false' "$FW_HOME/.env" 2>/dev/null; then

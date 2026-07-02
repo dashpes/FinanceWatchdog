@@ -121,6 +121,21 @@ def test_cash_etf_exempt_from_position_cap():
     assert d_etf.accepted, d_etf.reason
 
 
+def test_cash_etf_exempt_from_per_name_weight_cap():
+    # The cash ETF must hold the whole cash sleeve, which can exceed a single-equity cap.
+    acct = make_account(settled_cash="1000")
+    cfg = make_config(allowlist=["VOO", "SGOV"], max_order_pct=0.9).model_copy(update={
+        "cash_etf": "SGOV",
+        "caps": make_config().caps.model_copy(update={"max_per_name_weight": 0.35, "max_order_pct": 0.9}),
+    })
+    # A big SGOV buy (>35% of the book) is allowed...
+    d_etf = validate(buy("SGOV", notional="500"), acct, cfg, price=Decimal("100"))
+    assert d_etf.accepted, d_etf.reason
+    # ...but a real name over the cap is still rejected.
+    d_real = validate(buy("VOO", notional="500"), acct, cfg, price=Decimal("100"))
+    assert not d_real.accepted and d_real.code == "exceeds_per_name_cap"
+
+
 # --------------------------------------------------------------------------- #
 # Acceptance
 # --------------------------------------------------------------------------- #
