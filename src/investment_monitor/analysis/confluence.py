@@ -34,7 +34,9 @@ from investment_monitor.storage import (
     FINDING_INSIDER_CLUSTER,
     FINDING_MULTI_SOURCE,
     InsiderTransaction,
+    SIGNAL_ITEM_CODES,
     finding_exists_for_date,
+    get_material_events,
     get_prices,
     get_recent_news,
     get_session,
@@ -100,6 +102,10 @@ class ConfluenceConfig(BaseModel):
     # News third source (weak, non-directional corroboration). Only for insider-active
     # tickers; requires >= this many recent headlines to count as a source.
     news_min_items: int = Field(default=2, ge=1)
+    # 8-K filing source: a HIGH-SIGNAL material event (SIGNAL_ITEM_CODES — exec
+    # departures, material agreements, restatements...) on an insider-active name is
+    # strong corroboration; routine items (earnings releases, Reg FD) never count.
+    filings_enabled: bool = True
 
 
 def score_confluence(
@@ -287,11 +293,46 @@ def gather_news_evidence(
     return out
 
 
+def gather_filing_evidence(
+    session, tickers: set[str], today: date, *, window_days: int = 30,
+) -> list[Evidence]:
+    """8-K material-event Evidence — a STRONG source — for insider-active tickers.
+
+    Only filings carrying a high-signal Item (SIGNAL_ITEM_CODES) count: an exec
+    departure or material agreement landing while insiders are buying is genuine
+    cross-source confluence; a routine earnings-release 8-K is not. One Evidence per
+    filing (actor = the item codes), value=None so it corroborates via the source
+    multiplier, never via breadth/conviction.
+    """
+    out: list[Evidence] = []
+    for ticker in tickers:
+        try:
+            for ev in get_material_events(session, ticker, days=window_days):
+                signal = sorted(set(ev.items or []) & SIGNAL_ITEM_CODES)
+                if not signal:
+                    continue
+                out.append(Evidence(
+                    ticker=ticker, source="filing", actor=f"8-K {','.join(signal)}",
+                    date=ev.filed_date, value=None,
+                    detail=f"8-K items {', '.join(signal)}",
+                ))
+        except Exception as exc:  # noqa: BLE001 - filings are best-effort corroboration
+            logger.debug(f"filing evidence failed for {ticker}: {exc}")
+    return out
+
+
 def _price_change_since(session, ticker: str, since: date, today: date) -> float | None:
-    """Percent return from the close on/before ``since`` to the latest close (or None)."""
+    """Percent return from the close on/before ``since`` to the latest close on/before
+    ``today`` (or None).
+
+    ``get_prices`` windows relative to the REAL date.today(), while ``today`` may be an
+    as-of date in the past (tests, historical replay) — so the fetch window is anchored
+    at the real clock to reach back far enough, then rows after ``today`` are dropped so
+    an as-of run can never see the future.
+    """
     try:
-        prices = get_prices(session, ticker, days=(today - since).days + 8)
-        closes = [(p.date, p.close) for p in prices if p.close]
+        prices = get_prices(session, ticker, days=(date.today() - since).days + 8)
+        closes = [(p.date, p.close) for p in prices if p.close and p.date <= today]
         if len(closes) < 2:
             return None
         latest_close = closes[0][1]  # newest-first
@@ -321,6 +362,7 @@ def _build_narrative(
     total = stats["total_value"] or 0.0
     med = stats.get("median_per_actor") or 0.0
     vol = " + unusual volume" if any(e.source == "volume" for e in evidence) else ""
+    vol += " + material 8-K" if any(e.source == "filing" for e in evidence) else ""
     pc = f" {price_change:+.0f}% since buys." if price_change is not None else ""
     return (
         f"{ticker}: {len(insiders)} insiders bought on the open market{vol} over "
@@ -360,7 +402,13 @@ def detect_confluence(
         session, active_tickers, today,
         window_days=config.window_days, min_items=config.news_min_items,
     )
-    evidence = insider_ev + volume_ev + news_ev
+    filing_ev = (
+        gather_filing_evidence(
+            session, active_tickers, today, window_days=config.window_days
+        )
+        if config.filings_enabled else []
+    )
+    evidence = insider_ev + volume_ev + news_ev + filing_ev
 
     by_ticker: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence:

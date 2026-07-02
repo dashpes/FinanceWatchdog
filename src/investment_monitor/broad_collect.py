@@ -20,6 +20,7 @@ from loguru import logger
 
 from investment_monitor.collectors.base import CollectorResult
 from investment_monitor.collectors.insider import InsiderCollector
+from investment_monitor.collectors.material_events import MaterialEventsCollector
 from investment_monitor.collectors.news import NewsCollector
 from investment_monitor.collectors.prices import PriceCollector
 from investment_monitor.config import Settings, get_settings
@@ -52,6 +53,11 @@ async def run_broad_collection(
         # 1. SEC Form 4 insider transactions, retained market-wide (free, authoritative).
         insider = InsiderCollector(session, settings)
         results.append(await insider.collect_all(days_back=days_back, limit=limit))
+
+        # 1.5. SEC 8-K material corporate events, market-wide (same daily indexes,
+        #      header-only fetches). The raw event stream for event-driven theses.
+        events = MaterialEventsCollector(session, settings)
+        results.append(await events.collect_all(days_back=days_back, limit=limit))
 
         # 2. Daily OHLCV for the insider-active universe (foundation for volume-spike
         #    confluence + price context). No-op on a fresh DB with no insider rows.

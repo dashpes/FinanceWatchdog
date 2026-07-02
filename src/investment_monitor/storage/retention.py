@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, text
 from sqlalchemy.orm import Session
 
-from . import ConfluenceFinding, InsiderTransaction, NewsItem, Price
+from . import ConfluenceFinding, InsiderTransaction, MaterialEvent, NewsItem, Price
 
 
 def _utcnow() -> datetime:
@@ -36,18 +36,21 @@ class RetentionConfig(BaseModel):
     ``insider_days`` -> ``insider_transactions.trade_date``,
     ``news_days``    -> ``news_items.published_at``,
     ``price_days``   -> ``prices.date``,
-    ``findings_days``-> ``confluence_findings.as_of_date``.
+    ``findings_days``-> ``confluence_findings.as_of_date``,
+    ``events_days``  -> ``material_events.filed_date``.
     """
 
     insider_days: int = Field(default=0, ge=0)
     news_days: int = Field(default=0, ge=0)
     price_days: int = Field(default=0, ge=0)
     findings_days: int = Field(default=0, ge=0)
+    events_days: int = Field(default=0, ge=0)
 
     def any_enabled(self) -> bool:
         """True if at least one window is set (i.e. there is real work to do)."""
         return any(
-            (self.insider_days, self.news_days, self.price_days, self.findings_days)
+            (self.insider_days, self.news_days, self.price_days, self.findings_days,
+             self.events_days)
         )
 
 
@@ -76,6 +79,7 @@ def prune_old_data(session: Session, config: RetentionConfig) -> dict[str, int]:
         ("news_items", config.news_days, NewsItem, NewsItem.published_at),
         ("prices", config.price_days, Price, Price.date),
         ("confluence_findings", config.findings_days, ConfluenceFinding, ConfluenceFinding.as_of_date),
+        ("material_events", config.events_days, MaterialEvent, MaterialEvent.filed_date),
     ]
 
     for label, window_days, model, time_col in plan:

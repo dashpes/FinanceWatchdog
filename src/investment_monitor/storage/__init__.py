@@ -106,6 +106,8 @@ from .learning_operations import (
     record_learning_event,
     record_thesis_outcome,
 )
+from .event_models import SIGNAL_ITEM_CODES, MaterialEvent
+from .event_operations import get_material_events, material_event_exists
 from .shadow_models import (
     SHADOW_SOURCE_CONFLUENCE,
     SHADOW_SOURCE_DISCOVERY,
@@ -239,6 +241,11 @@ __all__ = [
     "outcome_exists_for_date",
     "accuracy_stats_for_symbol",
     "outcome_metrics",
+    # Material corporate events (SEC 8-K)
+    "MaterialEvent",
+    "SIGNAL_ITEM_CODES",
+    "material_event_exists",
+    "get_material_events",
     # Shadow ledger (considered-but-not-traded theses)
     "ShadowEntry",
     "SHADOW_SOURCE_CONFLUENCE",

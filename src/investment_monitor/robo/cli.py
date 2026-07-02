@@ -757,6 +757,7 @@ def prune() -> None:
         news_days=settings.retention_news_days,
         price_days=settings.retention_price_days,
         findings_days=settings.retention_findings_days,
+        events_days=settings.retention_events_days,
     )
     if not cfg.any_enabled():
         typer.echo("Retention disabled (all windows 0) — nothing to prune.")
