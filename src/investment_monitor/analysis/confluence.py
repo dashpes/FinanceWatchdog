@@ -194,6 +194,9 @@ def gather_insider_evidence(
         select(InsiderTransaction).where(
             InsiderTransaction.raw_code == "P",
             InsiderTransaction.trade_date >= cutoff,
+            # Upper bound is a no-op live (nothing files in the future) but makes
+            # as-of-past replays (the walk-forward backtest) lookahead-free.
+            InsiderTransaction.trade_date <= today,
         )
     ).all()
     seen: set[tuple] = set()

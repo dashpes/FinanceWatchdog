@@ -689,6 +689,56 @@ def learning(
             )
 
 
+@app.command("backtest")
+def backtest(
+    days: int = typer.Option(180, "--days", help="Replay window ending today"),
+    step: int = typer.Option(5, "--step", help="Days between signal re-evaluations"),
+    horizon: int = typer.Option(90, "--horizon", help="Max holding period (days)"),
+    min_score: float = typer.Option(4.0, "--min-score", help="Promotion score floor to test"),
+) -> None:
+    """Walk-forward replay of confluence -> promotion -> exits over stored history.
+
+    Uses the REAL production scoring and guards as-of each past date (insider +
+    volume sources; no look-ahead). Depth is bounded by ingested history — run
+    'investment-monitor --type collect-broad --days-back N' first to backfill
+    EDGAR, and note retention windows cap what is kept.
+    """
+    from datetime import date, timedelta
+
+    from investment_monitor.simulation.backtest import run_confluence_backtest
+
+    settings = get_settings()
+    init_db(settings.db_path)
+    end = date.today()
+    start = end - timedelta(days=days)
+    with get_session() as session:
+        result = run_confluence_backtest(
+            session, start=start, end=end, step_days=step,
+            horizon_days=horizon, promote_min_score=min_score,
+        )
+    s = result.summary()
+
+    def _fmt(st: dict) -> str:
+        if not st["n"]:
+            return "n=0"
+        return (
+            f"n={st['n']:<3} hit {st['hit_rate'] * 100:>3.0f}%  "
+            f"avg {st['avg'] * 100:+6.1f}%  med {st['median'] * 100:+6.1f}%  "
+            f"best {st['best'] * 100:+.0f}%  worst {st['worst'] * 100:+.0f}%"
+        )
+
+    typer.echo(f"Backtest {s['start']} -> {s['end']} ({s['steps']} steps, "
+               f"{s['n_trades']} trades, {s['n_closed']} closed)")
+    typer.echo(f"  overall      {_fmt(s['overall'])}")
+    for band, st in s["by_score_band"].items():
+        typer.echo(f"  score {band:<6} {_fmt(st)}")
+    for reason, st in s["by_exit_reason"].items():
+        typer.echo(f"  exit {reason:<9} {_fmt(st)}")
+    if not s["n_trades"]:
+        typer.echo("No trades — likely not enough insider/price history ingested "
+                   "for this window.")
+
+
 @app.command("sentinel")
 def sentinel(
     config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
