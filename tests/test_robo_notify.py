@@ -82,18 +82,30 @@ def test_todays_trade_lines_reads_rationale_from_db(tmp_path):
 
 # --- notify_run: trades ----------------------------------------------------------
 
+_ROWS = [
+    {"side": "Buy", "symbol": "AAPL", "size": "$500.00", "fill": "", "why": ""},
+    {"side": "Sell", "symbol": "TSLA", "size": "3 shares", "fill": "at $210.00", "why": ""},
+]
+
+
 def test_live_placements_send_one_text_with_orders():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True), \
-         patch.object(notify, "_placed_order_lines", return_value=["BUY AAPL $500", "SELL TSLA 3 sh"]):
-        notify.notify_run(_result(num_placed=2), _settings())
+    # Email configured -> the channel supports HTML, so the letter is built too.
+    settings = _settings(smtp_host="smtp.gmail.com", email_to="me@x.com")
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject, html=html) or True), \
+         patch.object(notify, "_placed_order_rows", return_value=list(_ROWS)), \
+         patch.object(notify, "_rejected_order_rows", return_value=None):
+        notify.notify_run(_result(num_placed=2), settings)
     text = captured["text"]
     assert "Live" in text
     assert "2 order(s) executed" in text
-    assert "BUY AAPL $500" in text
-    assert "SELL TSLA 3 sh" in text
+    assert "Buy AAPL — $500.00" in text
+    assert "Sell TSLA — 3 shares at $210.00" in text
     assert "Portfolio value: $12,345" in text
     assert "📈" not in text and "🛑" not in text  # no emojis
+    # The HTML alternative carries the same orders in the letter layout.
+    assert captured["html"] is not None
+    assert "AAPL" in captured["html"] and "ARCHIE" in captured["html"]
 
 
 def test_no_placements_is_silent():
@@ -104,15 +116,16 @@ def test_no_placements_is_silent():
 
 def test_paper_placements_silent_by_default():
     with patch.object(notify, "_send") as mock_send, \
-         patch.object(notify, "_placed_order_lines", return_value=["BUY AAPL $500"]):
+         patch.object(notify, "_placed_order_rows", return_value=list(_ROWS[:1])):
         notify.notify_run(_result(dry_run=True, num_placed=1), _settings(paper=False))
     mock_send.assert_not_called()
 
 
 def test_paper_placements_sent_when_enabled():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True), \
-         patch.object(notify, "_placed_order_lines", return_value=["BUY AAPL $500"]):
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject) or True), \
+         patch.object(notify, "_placed_order_rows", return_value=list(_ROWS[:1])), \
+         patch.object(notify, "_rejected_order_rows", return_value=None):
         notify.notify_run(_result(dry_run=True, num_placed=1), _settings(paper=True))
     assert "Paper" in captured["text"]
 
@@ -121,7 +134,7 @@ def test_paper_placements_sent_when_enabled():
 
 def test_refused_run_notifies():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True):
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject) or True):
         notify.notify_run(
             _result(status="refused", message="account has margin"), _settings()
         )
@@ -132,7 +145,7 @@ def test_refused_run_notifies():
 
 def test_failed_run_notifies():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True):
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject) or True):
         notify.notify_run(_result(status="failed", message="account fetch failed"), _settings())
     assert "Trading Run Failed" in captured["text"]
     assert "🛑" not in captured["text"]
@@ -140,7 +153,7 @@ def test_failed_run_notifies():
 
 def test_notify_run_never_raises():
     """A failure deep in formatting must never propagate into the CLI."""
-    with patch.object(notify, "_placed_order_lines", side_effect=RuntimeError("db down")), \
+    with patch.object(notify, "_placed_order_rows", side_effect=RuntimeError("db down")), \
          patch.object(notify, "_send", return_value=True):
         # Should not raise.
         notify.notify_run(_result(num_placed=1), _settings())
@@ -148,7 +161,7 @@ def test_notify_run_never_raises():
 
 def test_notify_error_sends_message():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True):
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject) or True):
         notify.notify_error(_settings(), message="boom", dry_run=False)
     assert "Trading Run Error" in captured["text"]
     assert "boom" in captured["text"]
@@ -254,7 +267,7 @@ def test_format_daily_summary_with_realized():
 
 def test_send_daily_summary_uses_send():
     captured = {}
-    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None: captured.update(text=t, subject=subject) or True):
+    with patch.object(notify, "_send", side_effect=lambda s, t, subject=None, html=None: captured.update(text=t, subject=subject) or True):
         assert notify.send_daily_summary(_settings(), _account()) is True
     assert "Daily Portfolio Summary" in captured["text"]
     # Email subject is brand-prefixed and never the "ARCHIE" letterhead line.

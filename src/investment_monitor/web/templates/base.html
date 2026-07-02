@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Archie{% endblock %} · Personal Private Equity</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%231e3a2f'/%3E%3Ctext x='16' y='23' font-family='Georgia,serif' font-size='20' fill='%23a9852f' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E">
+  <script>
+    // Theme before first paint (no flash): stored choice, else system preference.
+    (function () {
+      var stored = localStorage.getItem("archie-theme");
+      var theme = stored || (matchMedia("(prefers-color-scheme: dark)").matches ? "study" : "paper");
+      document.documentElement.dataset.theme = theme;
+    })();
+  </script>
+</head>
+<body data-advanced="off">
+  <header class="masthead">
+    <div class="wordmark">Archie</div>
+    <div class="firm">Personal Private Equity</div>
+    <div class="rule"></div>
+  </header>
+
+  <nav class="folio">
+    {% for item in nav %}
+    <a href="{{ item.href }}" {% if item.href == active %}class="active"{% endif %}>{{ item.title }}</a>
+    {% endfor %}
+    <span class="spacer"></span>
+    <span class="toggles">
+      <span id="mode-chips"></span>
+      <button class="plain" id="advanced-toggle" aria-pressed="false" title="Show every appendix and data column">Advanced</button>
+      <button class="plain" id="theme-toggle" title="Switch between the Paper and Study views">The Study</button>
+    </span>
+  </nav>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="colophon">
+    Prepared by Archie, your personal private-equity clerk. Figures are drawn from
+    the firm's own ledger and the broker's latest word; nothing here is financial advice.
+  </footer>
+
+  <script src="/static/js/ui.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

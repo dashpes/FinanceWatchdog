@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}System{% endblock %}
+{% block content %}
+<h1 class="page-title">The Engine Room</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Inspecting the machinery…</i></p></div>
+
+<div class="cards" id="cards"></div>
+
+<section class="ledger" id="services-section" style="display:none">
+  <div class="section-label">Services &amp; Timers</div>
+  <table class="sheet" style="max-width:640px">
+    <thead><tr><th>Unit</th><th>State</th><th>Next run</th></tr></thead>
+    <tbody id="services"></tbody>
+  </table>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Recent Runs</div>
+  <table class="sheet">
+    <thead><tr><th>Started</th><th>Status</th><th>Mode</th><th>Source</th><th class="num">Placed</th><th>Notes</th></tr></thead>
+    <tbody id="runs"></tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/system.js"></script>
+{% endblock %}

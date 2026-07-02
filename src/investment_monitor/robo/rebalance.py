@@ -27,6 +27,7 @@ from loguru import logger
 from sqlalchemy import func, select
 
 from investment_monitor.config import Settings
+from investment_monitor.robo import control
 from investment_monitor.robo.audit import AuditLogger
 from investment_monitor.robo.blocklist import add_learned, is_unbuyable_message, load_learned
 from investment_monitor.robo.broker import BrokerError, PublicBroker, fill_from_order_raw
@@ -150,8 +151,15 @@ class RebalanceResult:
 def _resolve_dry_run(
     config: RoboConfig, settings: Settings, override: bool | None
 ) -> bool:
-    """Live only when the env kill-switch is off AND config/override permit it."""
+    """Live only when every kill-switch is off AND config/override permit it.
+
+    The control file (written by the dashboard/CLI) is one-way: it can force
+    paper mode here, but clearing it never arms live trading — that still takes
+    the .env kill-switch AND config/override agreeing.
+    """
     if settings.robo_force_dry_run:
+        return True
+    if control.load_control(settings.db_path).force_dry_run:
         return True
     if override is not None:
         return override
@@ -307,6 +315,16 @@ def rebalance_run(
     run_id = str(uuid.uuid4())
     dry_run = _resolve_dry_run(config, settings, dry_run_override)
     audit = AuditLogger(settings.log_dir, run_id)
+
+    # Operator pause (dashboard/CLI): record the skipped run and stop before any
+    # broker contact. Research/discovery is unaffected — only trading pauses.
+    ctl = control.load_control(settings.db_path)
+    if ctl.trading_paused:
+        detail = "trading paused by operator" + (f": {ctl.reason}" if ctl.reason else "")
+        logger.warning("TRADING PAUSED — skipping run ({d})", d=detail)
+        audit.safety_check(passed=False, detail=detail)
+        _persist_refused(settings, run_id, dry_run, account_id="", reason=detail, status="paused")
+        return RebalanceResult(run_id=run_id, dry_run=dry_run, status="paused", message=detail)
 
     # Make the kill-switch state explicit on every LIVE run. A real OS/launchd env
     # var silently overrides the .env file, so surface where the value came from —

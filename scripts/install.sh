@@ -11,8 +11,8 @@
 #      the multi-GB 14B download doesn't hold up the install (services fail-open until ready)
 #   4. creates a dedicated `financewatchdog` service user + /opt/financewatchdog
 #   5. clones the repo at the latest RELEASE tag and builds the venv (+ a lockfile)
-#   6. renders and enables the systemd bundle (research loop + trade/summary/prune/
-#      auto-update timers) and sets the timezone to America/Los_Angeles
+#   6. renders and enables the systemd bundle (research loop + LAN dashboard + trade/
+#      summary/prune/auto-update timers) and sets the timezone to America/Los_Angeles
 #   7. runs the interactive `investment-robo init` wizard for credentials (dry-run
 #      forced on — you flip it live yourself after reviewing a dry-run cycle)
 #
@@ -160,7 +160,7 @@ fi
 PIP_NET="--retries 10 --timeout 120 --prefer-binary"
 sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install --quiet $PIP_NET --upgrade pip \
   || warn "pip self-upgrade skipped (using the venv's bundled pip)"
-sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install $PIP_NET -e "$FW_HOME[ai,notifications,robo]"
+sudo -u "$FW_USER" "$FW_HOME/.venv/bin/pip" install $PIP_NET -e "$FW_HOME[ai,notifications,robo,dashboard]"
 # Pin the exact resolved set so auto-updates on this box are reproducible (solves ARM
 # wheel drift: the lock is built here, against this Pi's Python/arch). --exclude-editable
 # keeps the app itself out of the lock (it is reinstalled with `-e` separately).
@@ -169,7 +169,7 @@ sudo -u "$FW_USER" bash -c "'$FW_HOME/.venv/bin/pip' freeze --exclude-editable >
 say "Granting the service user a scoped sudoers entry (systemctl restart only)"
 cat > /etc/sudoers.d/financewatchdog <<EOF
 # Lets the auto-updater and Ollama health-check restart services without a password.
-$FW_USER ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload, $SYSTEMCTL restart ollama, $SYSTEMCTL restart financewatchdog-research.service, $SYSTEMCTL restart financewatchdog-trade.timer, $SYSTEMCTL restart financewatchdog-summary.timer, $SYSTEMCTL restart financewatchdog-prune.timer, $SYSTEMCTL restart financewatchdog-autoupdate.timer
+$FW_USER ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload, $SYSTEMCTL restart ollama, $SYSTEMCTL restart financewatchdog-research.service, $SYSTEMCTL restart financewatchdog-dashboard.service, $SYSTEMCTL restart financewatchdog-trade.timer, $SYSTEMCTL restart financewatchdog-summary.timer, $SYSTEMCTL restart financewatchdog-prune.timer, $SYSTEMCTL restart financewatchdog-autoupdate.timer
 EOF
 chmod 440 /etc/sudoers.d/financewatchdog
 visudo -cf /etc/sudoers.d/financewatchdog >/dev/null || die "generated sudoers file is invalid"
@@ -204,8 +204,17 @@ if [ -f "$FW_HOME/.env" ]; then
   chmod 600 "$FW_HOME/.env"
 fi
 
+# Dashboard PIN: generated once, appended to .env. It gates every mutating endpoint
+# (pause/kill/blocklist/settings); reads are open on the LAN. Shown once at the end.
+DASH_TOKEN=""
+if [ -f "$FW_HOME/.env" ] && ! grep -q '^DASHBOARD_TOKEN=' "$FW_HOME/.env"; then
+  DASH_TOKEN="$(openssl rand -hex 8 2>/dev/null || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  printf '\n# Dashboard PIN — gates pause/kill/blocklist/settings on the web GUI\nDASHBOARD_TOKEN=%s\n' "$DASH_TOKEN" >> "$FW_HOME/.env"
+fi
+
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
+"$SYSTEMCTL" enable --now financewatchdog-dashboard.service 2>/dev/null || true
 for t in trade summary prune; do
   "$SYSTEMCTL" enable --now "financewatchdog-$t.timer" 2>/dev/null || true
 done
@@ -217,6 +226,11 @@ else
 fi
 
 say "Done — FinanceWatchdog is installed at $FW_HOME (ref: $FW_REF)"
+echo "Dashboard (Archie's web GUI): http://$(hostname).local:8321  (any browser on your wifi)"
+if [ -n "$DASH_TOKEN" ]; then
+  echo "  Dashboard PIN (for pause/kill/blocklist/settings): $DASH_TOKEN"
+  echo "  (also saved as DASHBOARD_TOKEN in $FW_HOME/.env)"
+fi
 echo "Trading stays in DRY-RUN until you set ROBO_FORCE_DRY_RUN=false in $FW_HOME/.env"
 echo "AND dry_run: false in $FW_HOME/config/robo.yaml. Useful checks:"
 echo "  systemctl list-timers 'financewatchdog-*'"

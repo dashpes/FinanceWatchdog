@@ -88,7 +88,8 @@ if [ "$RESTART" = 1 ]; then
   log "Restarting robo units"
   sudo -n "$SUDO_SYSTEMCTL" daemon-reload 2>/dev/null || true
   # Only restart units that are actually installed (keeps the sudoers surface exact).
-  for unit in financewatchdog-research.service financewatchdog-trade.timer \
+  for unit in financewatchdog-research.service financewatchdog-dashboard.service \
+              financewatchdog-trade.timer \
               financewatchdog-summary.timer financewatchdog-prune.timer \
               financewatchdog-autoupdate.timer; do
     if [ -n "$(systemctl list-unit-files "$unit" --no-legend 2>/dev/null)" ]; then

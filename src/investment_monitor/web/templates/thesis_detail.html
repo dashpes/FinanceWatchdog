@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Thesis{% endblock %}
+{% block content %}
+<h1 class="page-title" id="title">Thesis</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Fetching the papers…</i></p></div>
+
+<div class="cards" id="cards"></div>
+
+<section class="ledger">
+  <div class="section-label">The Argument</div>
+  <div class="prose"><blockquote class="narrative" id="narrative"></blockquote></div>
+</section>
+
+<section class="ledger">
+  <div class="section-label">How It Is Going <span class="note">price since Archie's entry, and his conviction as it moved</span></div>
+  <div class="chart" id="price-chart"></div>
+  <div class="chart" id="conviction-chart" style="height:200px"></div>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Standing Instructions <span class="note">the conditions that would end this idea</span></div>
+  <dl class="conditions" id="conditions"></dl>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Orders Under This Idea</div>
+  <table class="sheet">
+    <thead><tr><th>When</th><th>Side</th><th class="num">Size</th><th class="num">Fill</th><th>Gate</th><th>Note</th></tr></thead>
+    <tbody id="orders"></tbody>
+  </table>
+</section>
+
+<details class="appendix">
+  <summary>Appendix — Learning Record</summary>
+  <table class="sheet">
+    <thead><tr><th>Date</th><th>Kind</th><th class="num">Conviction</th><th class="num">Realised return</th>
+      <th class="num"><abbr title="Squared error of the conviction as a forecast; lower is better">Brier</abbr></th><th>Note</th></tr></thead>
+    <tbody id="learning"></tbody>
+  </table>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/thesis_detail.js"></script>
+{% endblock %}

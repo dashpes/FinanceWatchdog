@@ -74,6 +74,26 @@ def test_load_failopen_on_garbage_file(tmp_path):
     assert bl.load_learned(db) == set()  # logged + ignored, never raises
 
 
+def test_list_learned_returns_reasons(tmp_path):
+    db = _db(tmp_path)
+    bl.add_learned(db, "cbkm", reason="only available when closing")
+    bl.add_learned(db, "GME", reason="")
+    assert bl.list_learned(db) == {
+        "CBKM": "only available when closing",
+        "GME": "",
+    }
+    assert bl.list_learned(_db(tmp_path / "empty")) == {}
+
+
+def test_remove_learned(tmp_path):
+    db = _db(tmp_path)
+    bl.add_learned(db, "CBKM", reason="halted")
+    assert bl.remove_learned(db, "cbkm") is True
+    assert bl.load_learned(db) == set()
+    assert bl.remove_learned(db, "CBKM") is False  # already gone
+    assert bl.remove_learned(db, "") is False
+
+
 # --------------------------------------------------------------------------- #
 # gate enforcement
 # --------------------------------------------------------------------------- #

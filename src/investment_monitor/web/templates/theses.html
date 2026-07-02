@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Theses{% endblock %}
+{% block content %}
+<h1 class="page-title">The Book of Ideas</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Opening the book…</i></p></div>
+
+<section class="ledger">
+  <div class="section-label">Theses
+    <span class="note">
+      <select id="status-filter">
+        <option value="">every status</option>
+        <option value="active">active</option>
+        <option value="watch">watch</option>
+        <option value="draft">draft</option>
+        <option value="invalidated">invalidated</option>
+        <option value="exited">exited</option>
+      </select>
+    </span>
+  </div>
+  <table class="sheet">
+    <thead><tr>
+      <th>Idea</th><th>Status</th>
+      <th class="num"><abbr title="Archie's confidence in the idea, 0 to 1">Conviction</abbr></th>
+      <th class="num"><abbr title="The share of the portfolio the sizing rules assign to this idea">Target</abbr></th>
+      <th>The argument, in brief</th><th class="num advanced-only">Last evaluated</th>
+    </tr></thead>
+    <tbody id="theses"></tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/theses.js"></script>
+{% endblock %}

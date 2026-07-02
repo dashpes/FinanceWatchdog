@@ -5,13 +5,31 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
 
 _engine = None
 _SessionLocal = None
+
+
+def attach_sqlite_pragmas(engine) -> None:
+    """WAL + busy_timeout on every connection of ``engine``.
+
+    WAL lets readers (the dashboard) proceed while a trade/research run writes;
+    busy_timeout retries briefly instead of raising ``database is locked``. The
+    journal mode is persistent per DB file, so the first writer flips it once.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _set_pragmas(dbapi_conn, _record):  # pragma: no cover - trivial glue
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
 
 
 def _reconcile_schema(engine) -> None:
@@ -58,6 +76,7 @@ def init_db(db_path: str | Path = "data/portfolio.db") -> None:
         echo=False,
         connect_args={"check_same_thread": False},
     )
+    attach_sqlite_pragmas(_engine)
     _SessionLocal = sessionmaker(bind=_engine, autocommit=False, autoflush=False)
 
     Base.metadata.create_all(bind=_engine)

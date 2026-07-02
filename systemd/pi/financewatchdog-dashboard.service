@@ -1,0 +1,21 @@
+[Unit]
+Description=FinanceWatchdog dashboard — Archie's LAN web GUI (read + guarded controls)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+ExecStart=@FW_HOME@/.venv/bin/investment-dashboard
+Restart=always
+RestartSec=5
+# Read-only over the SQLite store; mutations go through the same control/blocklist/
+# tunables modules the CLI uses, gated by DASHBOARD_TOKEN. It never trades.
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

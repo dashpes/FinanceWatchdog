@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1 class="page-title">Standing Instructions</h1>
+
+<div class="letter">
+  <p class="salutation">Your instructions to Archie.</p>
+  <p>Changes are written to the firm's rulebook (<code>robo.yaml</code>) and take effect on the
+  <b>next run</b> — the machinery reads its instructions afresh each time it wakes.
+  Arming live trading cannot be done from here; that remains a console act.</p>
+</div>
+
+<section class="ledger">
+  <div class="section-label">Controls</div>
+  <div class="cards" style="margin-top:12px">
+    <div class="card">
+      <div class="k">Trading</div>
+      <div class="v" id="pause-state" style="font-size:18px">…</div>
+      <div class="sub" id="pause-detail"></div>
+      <p><button class="act" id="pause-btn" disabled>…</button></p>
+    </div>
+    <div class="card">
+      <div class="k">Web kill switch <abbr title="Forces paper mode from this dashboard. One-way: it can never arm live trading.">?</abbr></div>
+      <div class="v" id="kill-state" style="font-size:18px">…</div>
+      <div class="sub">forces paper mode; never the reverse</div>
+      <p><button class="act danger" id="kill-btn" disabled>…</button></p>
+    </div>
+    <div class="card">
+      <div class="k">Mode as the machinery sees it</div>
+      <div class="v" id="mode-state" style="font-size:18px">…</div>
+      <div class="sub" id="mode-detail"></div>
+    </div>
+  </div>
+  <div class="flash" id="control-flash"></div>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Blocklist <span class="note">names Archie must not buy; sells are never blocked</span></div>
+  <table class="sheet" style="max-width:640px">
+    <thead><tr><th>Symbol</th><th>Why</th><th>Origin</th><th></th></tr></thead>
+    <tbody id="blocklist"></tbody>
+  </table>
+  <p>
+    <input type="text" id="block-symbol" placeholder="symbol" size="8">
+    <input type="text" id="block-reason" placeholder="reason (optional)" size="28">
+    <button class="act" id="block-add">Add to blocklist</button>
+  </p>
+  <div class="flash" id="block-flash"></div>
+</section>
+
+<section class="ledger">
+  <div class="section-label">The Rulebook <span class="note">every tunable, grouped as the config file groups them</span></div>
+  <div id="tunables"><p class="muted"><i>Fetching the rulebook…</i></p></div>
+  <div class="flash" id="settings-flash"></div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/settings.js"></script>
+{% endblock %}

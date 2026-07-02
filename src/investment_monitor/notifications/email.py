@@ -44,6 +44,9 @@ class EmailChannel(NotificationChannel):
     """
 
     name = "email"
+    # The robo notify layer checks this to decide whether to build/pass an HTML
+    # alternative (iMessage and other channels never see one).
+    supports_html = True
 
     def __init__(
         self,
@@ -83,21 +86,26 @@ class EmailChannel(NotificationChannel):
         first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
         return (first[:150] or "FinanceWatchdog robo"), text
 
-    def _build(self, text: str, subject: str | None) -> EmailMessage:
+    def _build(self, text: str, subject: str | None, html: str | None = None) -> EmailMessage:
         subj, body = self._subject_and_body(text, subject)
         msg = EmailMessage()
         msg["From"] = self._sender
         msg["To"] = self._recipient
         msg["Subject"] = subj
         msg.set_content(body)
+        if html:
+            # multipart/alternative: plain part first, HTML last (preferred by clients).
+            msg.add_alternative(html, subtype="html")
         return msg
 
-    def send_text(self, text: str, subject: str | None = None) -> bool:
-        """Send a plain-text email. Synchronous; fail-open.
+    def send_text(self, text: str, subject: str | None = None, *, html: str | None = None) -> bool:
+        """Send an email. Synchronous; fail-open.
 
+        ``text`` is always the canonical body; when ``html`` is given the message is
+        sent as multipart/alternative so text-only clients still get the plain part.
         Returns True only when the SMTP server accepted the message for delivery.
         """
-        msg = self._build(text, subject)
+        msg = self._build(text, subject, html)
         try:
             if self._port == 465:
                 ctx = ssl.create_default_context()

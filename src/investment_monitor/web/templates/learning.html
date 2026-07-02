@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}The Study{% endblock %}
+{% block content %}
+<h1 class="page-title">The Study</h1>
+
+<div class="letter" id="letter"><p class="muted"><i>Consulting the records…</i></p></div>
+
+<div class="cards" id="cards"></div>
+
+<section class="ledger">
+  <div class="section-label">Calibration by Name
+    <span class="note">how often Archie's conviction pointed the right way, per idea</span>
+  </div>
+  <table class="sheet" style="max-width:640px">
+    <thead><tr>
+      <th>Name</th><th class="num">Outcomes</th>
+      <th class="num"><abbr title="Share of outcomes where the direction call was right">Hit rate</abbr></th>
+      <th class="num"><abbr title="Recency-weighted hit rate (newest outcomes weigh most)">EWMA</abbr></th>
+      <th class="num"><abbr title="Squared error of conviction as a forecast; 0 is perfect, 0.25 is guessing">Brier</abbr></th>
+    </tr></thead>
+    <tbody id="per-symbol"></tbody>
+  </table>
+</section>
+
+<section class="ledger">
+  <div class="section-label">Brier Over Time <span class="note">lower is better; 0.25 is a coin toss</span></div>
+  <div class="chart" id="brier-chart" style="height:240px"></div>
+</section>
+
+<details class="appendix">
+  <summary>Appendix — Weight Adaptations</summary>
+  <table class="sheet">
+    <thead><tr><th>Date</th><th>Name</th><th class="num">Before</th><th class="num">After</th><th>Applied</th><th>Note</th></tr></thead>
+    <tbody id="adaptations"></tbody>
+  </table>
+</details>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/echarts.min.js"></script>
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/learning.js"></script>
+{% endblock %}

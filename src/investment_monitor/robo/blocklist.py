@@ -19,6 +19,7 @@ blocklist error is logged and ignored, never raised, so it cannot break a run.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from loguru import logger
@@ -53,6 +54,39 @@ def load_learned(db_path: str) -> set[str]:
     """Return the set of auto-learned blocklisted symbols (uppercased)."""
     entries = _read(_path(db_path)).get("entries", {})
     return {str(s).upper() for s in entries}
+
+
+def list_learned(db_path: str) -> dict[str, str]:
+    """Learned entries with their reasons: {symbol: reason} (uppercased, sorted)."""
+    entries = _read(_path(db_path)).get("entries", {})
+    out: dict[str, str] = {}
+    for symbol, meta in sorted(entries.items()):
+        reason = meta.get("reason", "") if isinstance(meta, dict) else ""
+        out[str(symbol).upper()] = str(reason or "")
+    return out
+
+
+def remove_learned(db_path: str, symbol: str) -> bool:
+    """Drop ``symbol`` from the learned blocklist. Returns True if it was present."""
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return False
+    path = _path(db_path)
+    try:
+        data = _read(path)
+        entries = data.get("entries", {})
+        if symbol not in entries:
+            return False
+        del entries[symbol]
+        data["entries"] = entries
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+        os.replace(tmp, path)
+        logger.info("unblocklisted {s} for buys", s=symbol)
+        return True
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.warning("blocklist remove failed for {s} (ignored): {e}", s=symbol, e=exc)
+        return False
 
 
 def add_learned(db_path: str, symbol: str, reason: str = "") -> bool:
