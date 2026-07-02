@@ -10,13 +10,18 @@ This module orchestrates the full discovery process:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from loguru import logger
 from sqlalchemy.orm import Session
 
 from ..analysis import ResearchScorer
-from ..collectors import FundamentalsCollector, FundamentalsData, UniverseCollector
+from ..collectors import (
+    FundamentalsCollector,
+    FundamentalsData,
+    PriceCollector,
+    UniverseCollector,
+)
 from ..config import Settings
 from ..models import ResearchConfig, ScoringWeights
 from ..storage import (
@@ -25,11 +30,102 @@ from ..storage import (
     StockCandidate,
     get_candidate_by_ticker,
     get_candidates_by_status,
+    get_insider_transactions,
     get_latest_score,
+    get_prices,
+    get_recent_news,
     get_top_candidates,
     save_candidate,
     save_score,
 )
+
+# Enough daily history for 1y momentum + 52-week levels (calendar days).
+_PRICE_HISTORY_DAYS = 400
+
+
+def _close_on_or_before(prices: list, target: date) -> float | None:
+    """Latest close at or before ``target`` (``prices`` newest-first)."""
+    for p in prices:
+        if p.date <= target and p.close:
+            return float(p.close)
+    return None
+
+
+def _rsi(closes_old_to_new: list[float], period: int = 14) -> float | None:
+    """Simple (non-smoothed) 14-day RSI over the most recent ``period`` deltas."""
+    if len(closes_old_to_new) < period + 1:
+        return None
+    recent = closes_old_to_new[-(period + 1):]
+    gains = [max(0.0, b - a) for a, b in zip(recent, recent[1:])]
+    losses = [max(0.0, a - b) for a, b in zip(recent, recent[1:])]
+    avg_gain, avg_loss = sum(gains) / period, sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def compute_momentum_inputs(prices: list, *, today: date | None = None) -> dict:
+    """Derive the scorer's momentum inputs from stored daily prices (newest-first).
+
+    Every field degrades to None when history is insufficient — the scorer already
+    treats None as 'not available', so partial history never fabricates momentum.
+    52-week levels require >=300 days of span so a young series can't fake them.
+    """
+    today = today or date.today()
+    out: dict = {
+        "price_change_1m": None, "price_change_3m": None, "price_change_6m": None,
+        "price_change_1y": None, "rsi": None, "vs_52w_high": None, "vs_52w_low": None,
+    }
+    priced = [p for p in prices if p.close]
+    if not priced:
+        return out
+    latest = float(priced[0].close)
+    oldest = min(p.date for p in priced)
+    for key, span in (("price_change_1m", 30), ("price_change_3m", 91),
+                      ("price_change_6m", 182), ("price_change_1y", 365)):
+        target = today - timedelta(days=span)
+        if oldest > target:
+            continue  # series doesn't reach back that far
+        base = _close_on_or_before(priced, target)
+        if base and base > 0:
+            out[key] = (latest / base - 1.0) * 100.0
+    out["rsi"] = _rsi([float(p.close) for p in reversed(priced)])
+    if (today - oldest).days >= 300:
+        year = [float(p.close) for p in priced if p.date >= today - timedelta(days=365)]
+        if year:
+            out["vs_52w_high"] = (latest / max(year) - 1.0) * 100.0  # <=0: below the high
+            out["vs_52w_low"] = (latest / min(year) - 1.0) * 100.0   # >=0: above the low
+    return out
+
+
+def summarize_insider_activity(txns: list) -> str:
+    """Compact 90d open-market buy/sell summary for the sentiment prompt."""
+    buys = [t for t in txns if t.raw_code == "P"]
+    sells = [t for t in txns if t.raw_code == "S"]
+    if not buys and not sells:
+        return "No insider activity data"
+    buy_val = sum(float(t.total_value or 0.0) for t in buys)
+    sell_val = sum(float(t.total_value or 0.0) for t in sells)
+    if buy_val > sell_val:
+        lean = "net buying"
+    elif sell_val > buy_val:
+        lean = "net selling"
+    else:
+        lean = "mixed"
+    return (
+        f"Last 90d: {len(buys)} open-market buys (${buy_val:,.0f}) vs "
+        f"{len(sells)} sells (${sell_val:,.0f}) — {lean}"
+    )
+
+
+def summarize_recent_news(items: list, *, max_headlines: int = 3) -> str:
+    """Headline count + most-relevant titles for the sentiment prompt."""
+    if not items:
+        return "No recent news available"
+    ranked = sorted(items, key=lambda i: (i.relevance_score or 0.0), reverse=True)
+    heads = "; ".join((i.headline or "")[:120] for i in ranked[:max_headlines])
+    return f"{len(items)} headlines in the last 14d. Most relevant: {heads}"
 
 
 @dataclass
@@ -108,6 +204,10 @@ class DiscoveryPipeline:
             session=session,
             config=config,
         )
+        # Deep history for the scoring batch only, so momentum/RSI/52w inputs are real.
+        self.price_collector = PriceCollector(
+            session=session, config=config, days_to_fetch=_PRICE_HISTORY_DAYS
+        )
 
         # Initialize scorer
         self.scorer = ResearchScorer(model=ollama_model)
@@ -155,6 +255,16 @@ class DiscoveryPipeline:
             logger.info(
                 f"Fundamentals collected for {fundamentals_result.records_collected} candidates"
             )
+
+            # Step 3.5: Price history for the scoring batch (momentum/RSI/52w inputs).
+            # Best-effort: scoring proceeds on whatever history lands.
+            try:
+                prices_result = await self.price_collector.collect(candidates_to_process)
+                logger.info(
+                    f"Price history: {prices_result.records_collected} rows for scoring batch"
+                )
+            except Exception as e:
+                logger.warning(f"Price history collection failed (scoring degrades): {e}")
 
             # Step 4: Score candidates
             logger.info("Step 4: Scoring candidates...")
@@ -301,22 +411,26 @@ class DiscoveryPipeline:
         """
         weights = self.research_config.scoring_weights
 
+        # Derive real momentum/sentiment inputs from data already in the DB. Each
+        # degrades independently to the scorer's "not available" default.
+        momentum = compute_momentum_inputs(
+            get_prices(self.session, ticker, days=_PRICE_HISTORY_DAYS)
+        )
+        insider_summary = summarize_insider_activity(
+            get_insider_transactions(self.session, ticker, days=90)
+        )
+        news_summary = summarize_recent_news(
+            get_recent_news(self.session, ticker=ticker, hours=14 * 24)
+        )
+
         # Use the scorer's convenience method that handles all 5 factors
         score = await self.scorer.score_stock(
             fundamentals=fundamentals,
             weights=weights,
-            # Momentum data would ideally come from price history
-            # For now, using defaults - can be enhanced later
-            price_change_1m=None,
-            price_change_3m=None,
-            price_change_6m=None,
-            price_change_1y=None,
-            rsi=None,
-            vs_52w_high=None,
-            vs_52w_low=None,
-            # Sentiment data would come from news/insider collectors
-            recent_news_summary="No recent news available",
-            insider_activity="No insider activity data",
+            **momentum,
+            recent_news_summary=news_summary,
+            insider_activity=insider_summary,
+            # Still unsourced (no analyst/short-interest collectors yet).
             analyst_rating="No analyst data",
             short_interest=None,
         )

@@ -26,6 +26,20 @@ from investment_monitor.storage import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_network_prices():
+    """Stub the pipeline's price-history fetch (step 3.5) so tests never hit yfinance."""
+    with patch(
+        "investment_monitor.research.discovery.PriceCollector.collect",
+        new_callable=AsyncMock,
+        return_value=CollectorResult(
+            collector_name="prices", success=True, records_collected=0, errors=[],
+            started_at=datetime.now(), finished_at=datetime.now(),
+        ),
+    ):
+        yield
+
+
 @pytest.fixture
 def db_session():
     """Create a temporary database for testing."""

@@ -31,16 +31,31 @@ from investment_monitor.collectors.insider import is_junk_ticker
 from investment_monitor.config import Settings, get_settings
 from investment_monitor.storage import (
     ConfluenceFinding,
+    CongressionalTrade,
+    FINDING_CONGRESS_CLUSTER,
     FINDING_INSIDER_CLUSTER,
     FINDING_MULTI_SOURCE,
     InsiderTransaction,
+    SIGNAL_ITEM_CODES,
     finding_exists_for_date,
+    get_material_events,
     get_prices,
     get_recent_news,
     get_session,
     init_db,
     save_finding,
 )
+
+# "$100,001 - $250,000" -> (100001, 250000). eFD/PTR amounts are ranges only.
+_AMOUNT_RE = re.compile(r"\$?([\d,]+)")
+
+
+def _amount_midpoint(amount_range: str) -> float | None:
+    """Midpoint of a congressional disclosure amount range (lower bound if open-ended)."""
+    nums = [float(n.replace(",", "")) for n in _AMOUNT_RE.findall(amount_range or "")]
+    if not nums:
+        return None
+    return (nums[0] + nums[1]) / 2.0 if len(nums) >= 2 else nums[0]
 
 # Owner-name tokens that mark a fund/entity 10%-holder rather than an individual
 # insider. A board cluster of individuals is the v1 signal; entity/activist buys are a
@@ -100,6 +115,14 @@ class ConfluenceConfig(BaseModel):
     # News third source (weak, non-directional corroboration). Only for insider-active
     # tickers; requires >= this many recent headlines to count as a source.
     news_min_items: int = Field(default=2, ge=1)
+    # 8-K filing source: a HIGH-SIGNAL material event (SIGNAL_ITEM_CODES — exec
+    # departures, material agreements, restatements...) on an insider-active name is
+    # strong corroboration; routine items (earnings releases, Reg FD) never count.
+    filings_enabled: bool = True
+    # Congress source (Senate eFD PTR purchases): gathered MARKET-WIDE, so a
+    # >=min_actors congress cluster can be a finding on its own, and a single
+    # member's buy is strong cross-source corroboration on an insider-active name.
+    congress_enabled: bool = True
 
 
 def score_confluence(
@@ -188,6 +211,9 @@ def gather_insider_evidence(
         select(InsiderTransaction).where(
             InsiderTransaction.raw_code == "P",
             InsiderTransaction.trade_date >= cutoff,
+            # Upper bound is a no-op live (nothing files in the future) but makes
+            # as-of-past replays (the walk-forward backtest) lookahead-free.
+            InsiderTransaction.trade_date <= today,
         )
     ).all()
     seen: set[tuple] = set()
@@ -253,9 +279,12 @@ def gather_news_evidence(
 ) -> list[Evidence]:
     """News-flow Evidence — a weak THIRD source — for insider-active tickers.
 
-    Non-directional: a burst of recent headlines on a name that insiders are buying is
-    corroborating attention, not a buy/sell signal. Requires >= ``min_items`` recent
-    headlines to count, so a single stray article doesn't manufacture a source.
+    Mostly non-directional: a burst of recent headlines on a name that insiders are
+    buying is corroborating attention, not a buy/sell signal. Requires >= ``min_items``
+    recent headlines to count, so a single stray article doesn't manufacture a source.
+    Bearish-labeled items (see ``classify_unscored_sentiment``) are excluded — a burst
+    of bad news must never corroborate a LONG thesis; unlabeled items still count as
+    neutral attention.
     """
     # Score news by PUBLICATION time, so a backfill/re-ingest of weeks-old articles
     # (created_at = now, published_at = stale) can't masquerade as fresh corroboration
@@ -270,28 +299,101 @@ def gather_news_evidence(
             # actually PUBLISHED within the window. We over-fetch (drop the hours
             # bound's recency role) because created_at recency is not what gates here.
             items = get_recent_news(session, ticker=ticker, hours=window_days * 24)
-            pub_dates = [
-                i.published_at.date()
-                for i in items
+            kept = [
+                i for i in items
                 if i.published_at and i.published_at.date() >= published_cutoff
+                and (i.sentiment or "").lower() != "bearish"
             ]
-            if len(pub_dates) < min_items:
+            if len(kept) < min_items:
                 continue
+            pub_dates = [i.published_at.date() for i in kept]
+            n_bullish = sum(1 for i in kept if (i.sentiment or "").lower() == "bullish")
             latest = max(pub_dates)
             out.append(Evidence(
                 ticker=ticker, source="news", actor="news_flow", date=latest,
-                value=None, detail=f"{len(pub_dates)} recent headlines",
+                value=None,
+                detail=f"{len(kept)} recent headlines"
+                       + (f" ({n_bullish} bullish)" if n_bullish else ""),
             ))
         except Exception as exc:  # noqa: BLE001 - news is best-effort context
             logger.debug(f"news evidence failed for {ticker}: {exc}")
     return out
 
 
+def gather_congress_evidence(
+    session, window_days: int, today: date
+) -> list[Evidence]:
+    """Congressional PURCHASE Evidence, market-wide (a STRONG source).
+
+    Purchases only — long-side confluence, mirroring the insider gatherer. Value is
+    the disclosure range midpoint, so a $250k-500k senator buy carries conviction
+    weight while a $1k-15k token buy barely moves it. Junk/placeholder tickers
+    (bonds file as '--') are dropped by the shared filter.
+    """
+    cutoff = today - timedelta(days=window_days)
+    rows = session.scalars(
+        select(CongressionalTrade).where(
+            CongressionalTrade.trade_type == "buy",
+            CongressionalTrade.trade_date >= cutoff,
+            CongressionalTrade.trade_date <= today,  # as-of safe, like insider
+        )
+    ).all()
+    out: list[Evidence] = []
+    for r in rows:
+        ticker = (r.ticker or "").strip().upper()
+        if is_junk_ticker(ticker):
+            continue
+        actor = _normalize_actor(r.politician)
+        if not actor:
+            continue
+        out.append(Evidence(
+            ticker=ticker, source="congress", actor=actor, date=r.trade_date,
+            value=_amount_midpoint(r.amount_range),
+            detail=f"{actor} ({r.chamber or 'Congress'}) bought {r.amount_range}",
+        ))
+    return out
+
+
+def gather_filing_evidence(
+    session, tickers: set[str], today: date, *, window_days: int = 30,
+) -> list[Evidence]:
+    """8-K material-event Evidence — a STRONG source — for insider-active tickers.
+
+    Only filings carrying a high-signal Item (SIGNAL_ITEM_CODES) count: an exec
+    departure or material agreement landing while insiders are buying is genuine
+    cross-source confluence; a routine earnings-release 8-K is not. One Evidence per
+    filing (actor = the item codes), value=None so it corroborates via the source
+    multiplier, never via breadth/conviction.
+    """
+    out: list[Evidence] = []
+    for ticker in tickers:
+        try:
+            for ev in get_material_events(session, ticker, days=window_days):
+                signal = sorted(set(ev.items or []) & SIGNAL_ITEM_CODES)
+                if not signal:
+                    continue
+                out.append(Evidence(
+                    ticker=ticker, source="filing", actor=f"8-K {','.join(signal)}",
+                    date=ev.filed_date, value=None,
+                    detail=f"8-K items {', '.join(signal)}",
+                ))
+        except Exception as exc:  # noqa: BLE001 - filings are best-effort corroboration
+            logger.debug(f"filing evidence failed for {ticker}: {exc}")
+    return out
+
+
 def _price_change_since(session, ticker: str, since: date, today: date) -> float | None:
-    """Percent return from the close on/before ``since`` to the latest close (or None)."""
+    """Percent return from the close on/before ``since`` to the latest close on/before
+    ``today`` (or None).
+
+    ``get_prices`` windows relative to the REAL date.today(), while ``today`` may be an
+    as-of date in the past (tests, historical replay) — so the fetch window is anchored
+    at the real clock to reach back far enough, then rows after ``today`` are dropped so
+    an as-of run can never see the future.
+    """
     try:
-        prices = get_prices(session, ticker, days=(today - since).days + 8)
-        closes = [(p.date, p.close) for p in prices if p.close]
+        prices = get_prices(session, ticker, days=(date.today() - since).days + 8)
+        closes = [(p.date, p.close) for p in prices if p.close and p.date <= today]
         if len(closes) < 2:
             return None
         latest_close = closes[0][1]  # newest-first
@@ -303,8 +405,12 @@ def _price_change_since(session, ticker: str, since: date, today: date) -> float
         return None
 
 
-def _finding_kind(stats: dict) -> str:
-    return FINDING_MULTI_SOURCE if stats["n_sources"] > 1 else FINDING_INSIDER_CLUSTER
+def _finding_kind(stats: dict, evidence: list[Evidence]) -> str:
+    if stats["n_sources"] > 1:
+        return FINDING_MULTI_SOURCE
+    if any(e.source == "congress" for e in evidence):
+        return FINDING_CONGRESS_CLUSTER
+    return FINDING_INSIDER_CLUSTER
 
 
 def _build_narrative(
@@ -312,19 +418,32 @@ def _build_narrative(
     price_change: float | None = None,
 ) -> str:
     """A factual, honest insight — the 'look here': per-actor size, day spread,
-    a volume-corroboration tag, and price context."""
+    corroboration tags, and price context."""
     ins = [e for e in evidence if e.source == "insider"]
+    cong = [e for e in evidence if e.source == "congress"]
     insiders = sorted({e.actor for e in ins})
-    names = ", ".join(insiders[:4]) + (f" (+{len(insiders) - 4} more)" if len(insiders) > 4 else "")
-    idates = sorted(e.date for e in ins) or sorted(e.date for e in evidence)
+    members = sorted({e.actor for e in cong})
+    buyers = insiders or members
+    names = ", ".join(buyers[:4]) + (f" (+{len(buyers) - 4} more)" if len(buyers) > 4 else "")
+    dated = [e for e in (ins or cong)] or evidence
+    idates = sorted(e.date for e in dated)
     span = f"{idates[0]:%b %d}" + (f"–{idates[-1]:%b %d}" if idates[-1] != idates[0] else "")
     total = stats["total_value"] or 0.0
     med = stats.get("median_per_actor") or 0.0
+    if insiders:
+        lead = f"{ticker}: {len(insiders)} insiders bought on the open market"
+        if members:
+            lead += f" + {len(members)} member(s) of Congress"
+        per = "insider"
+    else:
+        lead = f"{ticker}: {len(members)} member(s) of Congress bought"
+        per = "member"
     vol = " + unusual volume" if any(e.source == "volume" for e in evidence) else ""
+    vol += " + material 8-K" if any(e.source == "filing" for e in evidence) else ""
     pc = f" {price_change:+.0f}% since buys." if price_change is not None else ""
     return (
-        f"{ticker}: {len(insiders)} insiders bought on the open market{vol} over "
-        f"{window_days}d ({span}) — ${total:,.0f} total, ~${med:,.0f}/insider, "
+        f"{lead}{vol} over "
+        f"{window_days}d ({span}) — ${total:,.0f} total, ~${med:,.0f}/{per}, "
         f"{len(set(idates))} day(s).{pc} Buyers: {names}."
     )
 
@@ -349,9 +468,16 @@ def detect_confluence(
     insider_ev = gather_insider_evidence(
         session, config.window_days, today, exclude_entities=config.exclude_entities
     )
-    # Second source: volume spikes, evaluated ONLY for insider-active tickers so they
-    # corroborate clusters (true cross-source confluence). Congress/news append here next.
-    active_tickers = {e.ticker for e in insider_ev}
+    # Congress is gathered MARKET-WIDE like insider, so congress-only clusters can
+    # qualify on their own (not just corroborate insider names).
+    congress_ev = (
+        gather_congress_evidence(session, config.window_days, today)
+        if config.congress_enabled else []
+    )
+    # Corroborating sources (volume/news/filings) are evaluated ONLY for tickers that
+    # already have primary-actor evidence, so they corroborate clusters (true
+    # cross-source confluence) rather than firing alone.
+    active_tickers = {e.ticker for e in insider_ev} | {e.ticker for e in congress_ev}
     volume_ev = gather_volume_evidence(
         session, active_tickers, today, spike_multiple=config.volume_spike_multiple,
         lookback=config.volume_lookback, min_avg_volume=config.volume_min_avg,
@@ -360,7 +486,13 @@ def detect_confluence(
         session, active_tickers, today,
         window_days=config.window_days, min_items=config.news_min_items,
     )
-    evidence = insider_ev + volume_ev + news_ev
+    filing_ev = (
+        gather_filing_evidence(
+            session, active_tickers, today, window_days=config.window_days
+        )
+        if config.filings_enabled else []
+    )
+    evidence = insider_ev + congress_ev + volume_ev + news_ev + filing_ev
 
     by_ticker: dict[str, list[Evidence]] = defaultdict(list)
     for e in evidence:
@@ -375,15 +507,21 @@ def detect_confluence(
             recency_halflife_days=config.recency_halflife_days,
             recency_floor=config.recency_floor,
         )
-        # A real finding needs >= min_actors INSIDERS, or >= 2 STRONG sources
-        # (insider + volume). News alone can corroborate but never qualify a name.
+        # A real finding needs >= min_actors from a PRIMARY-actor source (insiders
+        # or members of Congress), or >= 2 STRONG sources agreeing. News alone can
+        # corroborate but never qualify a name.
         insider_actors = len({e.actor for e in evs if e.source == "insider"})
-        breadth_ok = insider_actors >= config.min_actors or stats["n_strong"] >= 2
+        congress_actors = len({e.actor for e in evs if e.source == "congress"})
+        breadth_ok = (
+            insider_actors >= config.min_actors
+            or congress_actors >= config.min_actors
+            or stats["n_strong"] >= 2
+        )
         if not breadth_ok or stats["total_value"] < config.min_total_value:
             continue
         if stats["score"] < config.min_score:
             continue
-        kind = _finding_kind(stats)
+        kind = _finding_kind(stats, evs)
         if finding_exists_for_date(session, ticker, kind, today):
             continue
         # Price context: return since the median insider-buy date (best-effort).

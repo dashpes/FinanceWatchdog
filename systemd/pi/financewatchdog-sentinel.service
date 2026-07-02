@@ -1,0 +1,16 @@
+[Unit]
+Description=FinanceWatchdog robo — intraday sentinel (flag/invalidate open positions, never buys)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Watchdog over held names only: refreshes their quotes, trips the existing
+# deterministic invalidation (sell happens at the next gated trade run), and
+# emails on fresh material 8-Ks. No order path exists in this command.
+ExecStart=@FW_HOME@/scripts/robo-cron.sh sentinel

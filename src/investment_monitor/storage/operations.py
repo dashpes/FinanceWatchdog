@@ -105,6 +105,21 @@ def get_unscored_news(session: Session, limit: int = 100) -> list[NewsItem]:
     return list(session.scalars(stmt))
 
 
+def get_unclassified_news(session: Session, limit: int = 200) -> list[NewsItem]:
+    """Ticker-tagged news items with no sentiment label yet (newest first).
+
+    Ticker-less market wrap-ups are skipped: sentiment only becomes signal when it
+    can be attributed to a name (directional confluence corroboration).
+    """
+    stmt = (
+        select(NewsItem)
+        .where(NewsItem.sentiment.is_(None), NewsItem.ticker.is_not(None))
+        .order_by(NewsItem.created_at.desc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt))
+
+
 def get_recent_news(
     session: Session, ticker: str | None = None, hours: int = 24
 ) -> list[NewsItem]:

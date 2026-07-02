@@ -25,6 +25,7 @@ from loguru import logger
 from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
+    get_latest_price,
     get_prices,
     get_recent_findings,
     get_session,
@@ -32,9 +33,37 @@ from investment_monitor.storage import (
     init_db,
     save_thesis,
 )
+from investment_monitor.storage.shadow_models import SHADOW_SOURCE_CONFLUENCE
+from investment_monitor.storage.shadow_operations import record_shadow_entry
 
 # Exit if the insiders' bet sours (their cluster thesis failed).
 _DEFAULT_INVALIDATION = {"price_drop_pct": 25}
+
+
+def _shadow_skip(
+    session, finding, reason: str, *, close: float | None = None,
+    account_id: str | None = None,
+) -> None:
+    """Record a skipped finding in the shadow ledger (fail-open: never blocks promotion)."""
+    try:
+        if close is None:
+            price = get_latest_price(session, finding.ticker)
+            close = float(price.close) if price and price.close else None
+        record_shadow_entry(
+            session,
+            symbol=finding.ticker,
+            source=SHADOW_SOURCE_CONFLUENCE,
+            skip_reason=reason,
+            entry_date=finding.as_of_date or date.today(),
+            entry_price=close,
+            account_id=account_id,
+            ref_id=finding.id,
+            detail=finding.narrative,
+            score=float(finding.score),
+            conviction=_conviction_from_score(finding.score),
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must never block promotion
+        logger.debug(f"shadow record failed for {finding.ticker}: {exc}")
 
 
 def _conviction_from_score(score: float) -> float:
@@ -72,9 +101,14 @@ def promote_confluence_findings(
     min_dollar_volume: float = 250_000.0,
     max_run_pct: float = 40.0,
 ) -> list[str]:
-    """Promote the strongest fresh, liquid confluence findings to ACTIVE theses."""
+    """Promote the strongest fresh, liquid confluence findings to ACTIVE theses.
+
+    Every fresh finding that does NOT become a thesis is recorded in the shadow
+    ledger with its skip reason, so the floor/cap/guards become measurable
+    counterfactuals instead of silent policy.
+    """
     raw = get_recent_findings(
-        session, min_score=min_score, limit=max_promotions * 6, max_age_days=max_age_days
+        session, min_score=0.0, limit=max_promotions * 12, max_age_days=max_age_days
     )
     # One candidate per ticker (strongest), strongest first.
     best: dict[str, "object"] = {}
@@ -85,8 +119,12 @@ def promote_confluence_findings(
 
     promoted: list[str] = []
     for f in candidates:
+        if f.score < min_score:
+            _shadow_skip(session, f, "below_score_floor", account_id=account_id)
+            continue
         if len(promoted) >= max_promotions:
-            break
+            _shadow_skip(session, f, "cap_overflow", account_id=account_id)
+            continue
         existing = get_thesis(session, f.ticker, account_id)
         if existing is not None:
             if existing.status != ThesisStatus.INVALIDATED.value:
@@ -102,15 +140,19 @@ def promote_confluence_findings(
             # `same_finding`, so a same-day re-promote can only come from a new finding.
             stale = le is not None and f.as_of_date is not None and f.as_of_date < le.date()
             if same_finding or stale:
+                _shadow_skip(session, f, "reentry_guard", account_id=account_id)
                 continue
         # Already run up big since the buys? The insider signal is priced in — skip.
         if f.price_change_pct is not None and f.price_change_pct > max_run_pct:
+            _shadow_skip(session, f, "run_up", account_id=account_id)
             continue
         tradeable, close = _liquidity(
             session, f.ticker, min_price=min_price, min_dollar_volume=min_dollar_volume
         )
         if not tradeable or close is None:
-            continue  # penny / illiquid / stale price — not safe to auto-trade
+            # penny / illiquid / stale price — not safe to auto-trade
+            _shadow_skip(session, f, "illiquid", close=close, account_id=account_id)
+            continue
         conviction = _conviction_from_score(f.score)
         thesis = Thesis(
             symbol=f.ticker,

@@ -19,15 +19,17 @@ from investment_monitor.storage import (
 )
 
 # Three trades in names that are NOT in any portfolio — the whole point of "broad".
-HOUSE = [
-    {"representative": "Rep A", "ticker": "NVDA", "type": "purchase",
-     "amount": "$1,001 - $15,000", "transaction_date": "2026-06-01", "party": "D"},
-    {"representative": "Rep B", "ticker": "SMCI", "type": "sale",
-     "amount": "$15,001 - $50,000", "transaction_date": "2026-05-15"},
-]
+# Shaped like fetch_senate_efd_trades output (the live source; the S3 mirrors died).
 SENATE = [
-    {"senator": "Sen C", "ticker": "TSLA", "type": "purchase",
-     "amount": "$1,001 - $15,000", "transaction_date": "2026-06-10"},
+    {"senator": "Rep A", "ticker": "NVDA", "type": "Purchase",
+     "amount": "$1,001 - $15,000", "transaction_date": "06/01/2026",
+     "source_url": "https://efdsearch.senate.gov/search/view/ptr/a/"},
+    {"senator": "Rep B", "ticker": "SMCI", "type": "Sale (Full)",
+     "amount": "$15,001 - $50,000", "transaction_date": "05/15/2026",
+     "source_url": "https://efdsearch.senate.gov/search/view/ptr/b/"},
+    {"senator": "Sen C", "ticker": "TSLA", "type": "Purchase",
+     "amount": "$1,001 - $15,000", "transaction_date": "06/10/2026",
+     "source_url": "https://efdsearch.senate.gov/search/view/ptr/c/"},
 ]
 
 
@@ -36,13 +38,12 @@ def _settings(tmp_path, db):
                     log_dir=tmp_path, db_path=db)
 
 
-def _collector(tmp_path, db, *, house=HOUSE, senate=SENATE):
-    """A collector wired to a fresh session with the feeds mocked (no network)."""
+def _collector(tmp_path, db, *, senate=SENATE):
+    """A collector wired to a fresh session with the feed mocked (no network)."""
     init_db(db)
     session = get_session().__enter__()  # plain session; collect_all commits itself
     c = CongressTradesCollector(session, _settings(tmp_path, db))
-    c.fetch_house_trades = AsyncMock(return_value=house)
-    c.fetch_senate_trades = AsyncMock(return_value=senate)
+    c.fetch_senate_efd_trades = AsyncMock(return_value=senate)
     return c
 
 
@@ -85,14 +86,14 @@ async def test_collect_all_since_filter_bounds_volume(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collect_all_survives_one_chamber_failing(tmp_path):
+async def test_collect_all_surfaces_source_failure(tmp_path):
     db = tmp_path / "t.db"
     c = _collector(tmp_path, db)
-    c.fetch_senate_trades = AsyncMock(side_effect=RuntimeError("S3 down"))
+    c.fetch_senate_efd_trades = AsyncMock(side_effect=RuntimeError("eFD down"))
     result = await c.collect_all()
-    assert result.records_collected == 2          # House still retained
-    assert not result.success and result.errors   # Senate failure surfaced
-    assert _tickers(db) == {"NVDA", "SMCI"}
+    assert result.records_collected == 0
+    assert not result.success and result.errors   # failure surfaced, not swallowed
+    assert _tickers(db) == set()
 
 
 # --------------------------------------------------------------------------- #

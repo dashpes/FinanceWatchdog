@@ -169,7 +169,7 @@ sudo -u "$FW_USER" bash -c "'$FW_HOME/.venv/bin/pip' freeze --exclude-editable >
 say "Granting the service user a scoped sudoers entry (systemctl restart only)"
 cat > /etc/sudoers.d/financewatchdog <<EOF
 # Lets the auto-updater and Ollama health-check restart services without a password.
-$FW_USER ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload, $SYSTEMCTL restart ollama, $SYSTEMCTL restart financewatchdog-research.service, $SYSTEMCTL restart financewatchdog-dashboard.service, $SYSTEMCTL restart financewatchdog-trade.timer, $SYSTEMCTL restart financewatchdog-summary.timer, $SYSTEMCTL restart financewatchdog-prune.timer, $SYSTEMCTL restart financewatchdog-autoupdate.timer
+$FW_USER ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload, $SYSTEMCTL restart ollama, $SYSTEMCTL restart financewatchdog-research.service, $SYSTEMCTL restart financewatchdog-dashboard.service, $SYSTEMCTL restart financewatchdog-trade.timer, $SYSTEMCTL restart financewatchdog-sentinel.timer, $SYSTEMCTL restart financewatchdog-summary.timer, $SYSTEMCTL restart financewatchdog-prune.timer, $SYSTEMCTL restart financewatchdog-autoupdate.timer
 EOF
 chmod 440 /etc/sudoers.d/financewatchdog
 visudo -cf /etc/sudoers.d/financewatchdog >/dev/null || die "generated sudoers file is invalid"
@@ -222,7 +222,7 @@ DASH_PORT="${DASH_PORT:-8321}"
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
 "$SYSTEMCTL" enable --now financewatchdog-dashboard.service 2>/dev/null || true
-for t in trade summary prune; do
+for t in trade summary prune sentinel; do
   "$SYSTEMCTL" enable --now "financewatchdog-$t.timer" 2>/dev/null || true
 done
 # Auto-update only makes sense if the runtime user can actually pull the repo.

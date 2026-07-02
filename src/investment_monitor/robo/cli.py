@@ -384,6 +384,25 @@ def thesis_run(
         if promoted:
             typer.echo(f"Promoted {len(promoted)} new name(s): {', '.join(promoted)}")
 
+    # 1.5 Shadow ledger: sweep gate-rejects + discovery near-misses into the ledger,
+    #     mark open counterfactuals, close those past horizon. Fail-open bookkeeping.
+    try:
+        from investment_monitor.robo.shadow import maintain_shadow_ledger
+
+        with get_session() as session:
+            sh = maintain_shadow_ledger(
+                session,
+                score_floor=float(auto_cfg.autonomy.score_floor),
+                account_id=acct,
+            )
+        if any(sh.values()):
+            typer.echo(
+                f"Shadow ledger: +{sh['gate']} gate, +{sh['discovery']} discovery, "
+                f"{sh['marked']} marked, {sh['closed']} closed"
+            )
+    except Exception as exc:  # noqa: BLE001 - shadow bookkeeping must never block a run
+        typer.secho(f"shadow ledger maintenance skipped: {exc}", fg=typer.colors.YELLOW)
+
     # 2. Maintain existing theses (deterministic invalidation, then LLM re-eval).
     if not skip_maintenance:
         actions = {"invalidated": 0, "updated": 0, "unchanged": 0}
@@ -670,6 +689,133 @@ def learning(
             )
 
 
+@app.command("backtest")
+def backtest(
+    days: int = typer.Option(180, "--days", help="Replay window ending today"),
+    step: int = typer.Option(5, "--step", help="Days between signal re-evaluations"),
+    horizon: int = typer.Option(90, "--horizon", help="Max holding period (days)"),
+    min_score: float = typer.Option(4.0, "--min-score", help="Promotion score floor to test"),
+) -> None:
+    """Walk-forward replay of confluence -> promotion -> exits over stored history.
+
+    Uses the REAL production scoring and guards as-of each past date (insider +
+    volume sources; no look-ahead). Depth is bounded by ingested history — run
+    'investment-monitor --type collect-broad --days-back N' first to backfill
+    EDGAR, and note retention windows cap what is kept.
+    """
+    from datetime import date, timedelta
+
+    from investment_monitor.simulation.backtest import run_confluence_backtest
+
+    settings = get_settings()
+    init_db(settings.db_path)
+    end = date.today()
+    start = end - timedelta(days=days)
+    with get_session() as session:
+        result = run_confluence_backtest(
+            session, start=start, end=end, step_days=step,
+            horizon_days=horizon, promote_min_score=min_score,
+        )
+    s = result.summary()
+
+    def _fmt(st: dict) -> str:
+        if not st["n"]:
+            return "n=0"
+        return (
+            f"n={st['n']:<3} hit {st['hit_rate'] * 100:>3.0f}%  "
+            f"avg {st['avg'] * 100:+6.1f}%  med {st['median'] * 100:+6.1f}%  "
+            f"best {st['best'] * 100:+.0f}%  worst {st['worst'] * 100:+.0f}%"
+        )
+
+    typer.echo(f"Backtest {s['start']} -> {s['end']} ({s['steps']} steps, "
+               f"{s['n_trades']} trades, {s['n_closed']} closed)")
+    typer.echo(f"  overall      {_fmt(s['overall'])}")
+    for band, st in s["by_score_band"].items():
+        typer.echo(f"  score {band:<6} {_fmt(st)}")
+    for reason, st in s["by_exit_reason"].items():
+        typer.echo(f"  exit {reason:<9} {_fmt(st)}")
+    if not s["n_trades"]:
+        typer.echo("No trades — likely not enough insider/price history ingested "
+                   "for this window.")
+
+
+@app.command("sentinel")
+def sentinel(
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+) -> None:
+    """Intraday watchdog over open positions: invalidate/flag only, never buy.
+
+    No-op outside regular trading hours, so an hourly timer needs no market-
+    calendar logic. A tripped invalidation zeroes the thesis; the actual sell
+    happens at the next scheduled, fully-gated trade run.
+    """
+    from investment_monitor.robo.sentinel import run_sentinel
+
+    settings = get_settings()
+    cfg = _load_config(config)
+    init_db(settings.db_path)
+    result = run_sentinel(settings, cfg)
+    if result["status"] == "market_closed":
+        typer.echo("Market closed — sentinel pass skipped.")
+        return
+    typer.echo(
+        f"Sentinel: {result['checked']} position(s) checked, "
+        f"{len(result['tripped'])} invalidated, {len(result['flagged'])} flagged"
+    )
+    for line in result["tripped"] + result["flagged"]:
+        typer.echo(f"  - {line}")
+
+
+@app.command("shadow")
+def shadow(
+    limit: int = typer.Option(15, "--limit", help="Open entries to list"),
+    evaluate: bool = typer.Option(
+        False, "--evaluate", help="Run a maintenance pass (sync + mark/close) first"
+    ),
+) -> None:
+    """Traded vs skipped: how the theses we did NOT take are performing.
+
+    The shadow ledger tracks every considered-but-skipped thesis (promotion floor,
+    caps, liquidity/run-up guards, gate rejects) at its skip-day price, so the skip
+    policy itself gets a report card next to the real-money outcomes.
+    """
+    from investment_monitor.robo.shadow import maintain_shadow_ledger, shadow_report
+    from investment_monitor.storage import SHADOW_STATUS_OPEN, get_shadow_entries
+
+    settings = get_settings()
+    init_db(settings.db_path)
+    with get_session() as session:
+        if evaluate:
+            maintain_shadow_ledger(session)
+        report = shadow_report(session)
+        entries = get_shadow_entries(session, status=SHADOW_STATUS_OPEN, limit=limit)
+
+        real = report["real"]
+        if real["n"]:
+            typer.echo(
+                f"real outcomes: n={real['n']}  hit {real['hit_rate'] * 100:.0f}%  "
+                f"avg {real['avg_return'] * 100:+.1f}%"
+            )
+        else:
+            typer.echo("real outcomes: none recorded yet")
+        for source, st in sorted(report["shadow"].items()):
+            hit = f"{st['hit_rate'] * 100:.0f}%" if st["hit_rate"] is not None else "—"
+            avg = f"{st['avg_return'] * 100:+.1f}%" if st["avg_return"] is not None else "—"
+            mark = f"{st['open_mark'] * 100:+.1f}%" if st["open_mark"] is not None else "—"
+            typer.echo(
+                f"shadow[{source}]: open {st['open']} (mark {mark})  "
+                f"closed {st['closed']}  hit {hit}  avg {avg}"
+            )
+        if entries:
+            typer.echo(f"\n{'symbol':<8} {'source':<12} {'reason':<20} {'entry':>8} {'mark':>7}")
+            for e in entries:
+                mark = f"{e.realized_return * 100:+.1f}%" if e.realized_return is not None else "—"
+                price = f"${e.entry_price:,.2f}" if e.entry_price else "—"
+                typer.echo(
+                    f"{e.symbol:<8} {e.source:<12} {e.skip_reason:<20} {price:>8} {mark:>7}"
+                )
+
+
 @app.command("prune")
 def prune() -> None:
     """Prune old market data to keep the SQLite DB bounded (weekly on the Pi).
@@ -688,6 +834,7 @@ def prune() -> None:
         news_days=settings.retention_news_days,
         price_days=settings.retention_price_days,
         findings_days=settings.retention_findings_days,
+        events_days=settings.retention_events_days,
     )
     if not cfg.any_enabled():
         typer.echo("Retention disabled (all windows 0) — nothing to prune.")

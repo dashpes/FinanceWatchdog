@@ -25,6 +25,10 @@ from .models import Base
 LEARNING_KIND_OUTCOME = "thesis_outcome"
 LEARNING_KIND_ACCURACY_MODIFIER = "accuracy_modifier"
 LEARNING_KIND_WEIGHT_ADAPTATION = "weight_adaptation"
+# Counterfactual outcome of a considered-but-not-traded thesis (shadow ledger). A
+# DISTINCT kind so accuracy_stats_for_symbol (kind == thesis_outcome) never mixes
+# hypothetical outcomes into real-money accuracy sizing.
+LEARNING_KIND_SHADOW_OUTCOME = "shadow_outcome"
 
 
 class LearningEvent(Base):

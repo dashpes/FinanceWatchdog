@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     retention_news_days: int = 180
     retention_price_days: int = 180
     retention_findings_days: int = 365
+    retention_events_days: int = 365
 
 
 def load_yaml_config(config_dir: Path, filename: str) -> dict[str, Any]:

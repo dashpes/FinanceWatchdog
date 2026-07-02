@@ -20,6 +20,7 @@ from .models import Base
 # Finding kinds.
 FINDING_INSIDER_CLUSTER = "insider_cluster"   # >=N distinct insiders buying one name
 FINDING_MULTI_SOURCE = "multi_source"         # >=2 distinct sources agreeing on one name
+FINDING_CONGRESS_CLUSTER = "congress_cluster"  # >=N distinct members of Congress buying one name
 
 
 class ConfluenceFinding(Base):

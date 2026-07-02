@@ -126,7 +126,7 @@ def test_init_writes_env_to_fw_home_not_cwd(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_prune_reports_disabled_when_all_windows_zero(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    for k in ("INSIDER", "NEWS", "PRICE", "FINDINGS"):
+    for k in ("INSIDER", "NEWS", "PRICE", "FINDINGS", "EVENTS"):
         monkeypatch.setenv(f"RETENTION_{k}_DAYS", "0")
     result = CliRunner().invoke(cli.app, ["prune"])
     assert result.exit_code == 0, result.output
