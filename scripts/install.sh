@@ -211,6 +211,13 @@ if [ -f "$FW_HOME/.env" ] && ! grep -q '^DASHBOARD_TOKEN=' "$FW_HOME/.env"; then
   DASH_TOKEN="$(openssl rand -hex 8 2>/dev/null || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   printf '\n# Dashboard PIN — gates pause/kill/blocklist/settings on the web GUI\nDASHBOARD_TOKEN=%s\n' "$DASH_TOKEN" >> "$FW_HOME/.env"
 fi
+# Default the appliance to port 80 (the unit grants CAP_NET_BIND_SERVICE), so the
+# GUI is just http://<host>.local — override with DASHBOARD_PORT in .env.
+if [ -f "$FW_HOME/.env" ] && ! grep -q '^DASHBOARD_PORT=' "$FW_HOME/.env"; then
+  printf 'DASHBOARD_PORT=80\n' >> "$FW_HOME/.env"
+fi
+DASH_PORT="$(grep '^DASHBOARD_PORT=' "$FW_HOME/.env" 2>/dev/null | tail -1 | cut -d= -f2)"
+DASH_PORT="${DASH_PORT:-8321}"
 
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
@@ -226,7 +233,11 @@ else
 fi
 
 say "Done — FinanceWatchdog is installed at $FW_HOME (ref: $FW_REF)"
-echo "Dashboard (Archie's web GUI): http://$(hostname).local:8321  (any browser on your wifi)"
+if [ "$DASH_PORT" = 80 ]; then
+  echo "Dashboard (Archie's web GUI): http://$(hostname).local  (any browser on your wifi)"
+else
+  echo "Dashboard (Archie's web GUI): http://$(hostname).local:$DASH_PORT  (any browser on your wifi)"
+fi
 if [ -n "$DASH_TOKEN" ]; then
   echo "  Dashboard PIN (for pause/kill/blocklist/settings): $DASH_TOKEN"
   echo "  (also saved as DASHBOARD_TOKEN in $FW_HOME/.env)"
