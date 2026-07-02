@@ -68,14 +68,15 @@ class UniverseCollector(BaseCollector):
         Raises:
             httpx.HTTPStatusError: If request fails
         """
+        # Wikipedia's User-Agent policy BLOCKS spoofed/generic browser agents (the old
+        # fake-Chrome string here got 403'd). Send a descriptive UA that identifies the
+        # app and a real contact, per https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy.
+        contact = (self.config.sec_contact_email or "").strip() or "contact@financewatchdog.app"
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/91.0.4472.124 Safari/537.36"
-            )
+            "User-Agent": f"FinanceWatchdog/1.0 (https://github.com/dashpes/FinanceWatchdog; {contact})",
+            "Accept": "text/html,application/xhtml+xml",
         }
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             response = await client.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             return response.text

@@ -357,17 +357,19 @@ def _html_learning(settings: Settings) -> dict | None:
 
         init_db(settings.db_path)
         with get_session() as session:
-            events = (
-                session.query(LearningEvent)
+            # Materialize scalars inside the session — the rows detach on exit.
+            outcomes = [
+                (int(e.direction_correct or 0), e.brier)
+                for e in session.query(LearningEvent)
                 .filter(LearningEvent.kind == LEARNING_KIND_OUTCOME)
                 .all()
-            )
-        if not events:
+            ]
+        if not outcomes:
             return None
-        hits = [int(e.direction_correct or 0) for e in events]
-        briers = [float(e.brier) for e in events if e.brier is not None]
+        hits = [h for h, _ in outcomes]
+        briers = [float(b) for _, b in outcomes if b is not None]
         return {
-            "n": len(events),
+            "n": len(outcomes),
             "win_rate": sum(hits) / len(hits),
             "brier": (sum(briers) / len(briers)) if briers else None,
         }
@@ -395,7 +397,7 @@ def _prev_total_value(settings: Settings):
                 .order_by(RoboRun.started_at.desc())
                 .first()
             )
-        return row.total_value if row is not None else None
+            return row.total_value if row is not None else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("prev total unavailable (ignored): {e}", e=exc)
         return None

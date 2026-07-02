@@ -274,6 +274,29 @@ def test_send_daily_summary_uses_send():
     assert captured["subject"].startswith("Archie · Daily Portfolio Summary")
 
 
+# --- HTML letter gatherers (hit a real DB; values must be read before detach) ------
+
+def test_html_gatherers_read_from_db(tmp_path):
+    from datetime import date, datetime, timedelta, timezone
+
+    from investment_monitor.storage import RoboRun, get_session, init_db
+    from investment_monitor.storage.learning_models import LearningEvent
+
+    db = tmp_path / "t.db"
+    init_db(db)
+    yesterday = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+    with get_session() as s:
+        s.add(RoboRun(run_id="r0", dry_run=True, status="completed",
+                      total_value=100.0, started_at=yesterday))
+        s.add(LearningEvent(kind="thesis_outcome", symbol="EML",
+                            as_of_date=date.today(), direction_correct=1, brier=0.04))
+    settings = SimpleNamespace(db_path=str(db))
+
+    learning = notify._html_learning(settings)
+    assert learning == {"n": 1, "win_rate": 1.0, "brier": 0.04}
+    assert notify._prev_total_value(settings) == 100.0
+
+
 def test_send_test_uses_send():
     with patch.object(notify, "_send", return_value=True) as mock_send:
         assert notify.send_test(_settings()) is True
