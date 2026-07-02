@@ -164,6 +164,13 @@ class TestUniverseCollectorInit:
         assert collector._collect_sp500 is False
         assert collector._collect_nasdaq100 is False
 
+    def test_user_agent_is_wikipedia_compliant(self, mock_session):
+        # Regression: Wikipedia 403s spoofed/generic browser UAs. Ours must be a
+        # descriptive tool + contact, never a fake browser string.
+        ua = UniverseCollector(mock_session, Settings(sec_contact_email="me@example.com"))._user_agent()
+        assert "FinanceWatchdog" in ua and "me@example.com" in ua
+        assert "Mozilla" not in ua and "Chrome" not in ua
+
 
 # ============================================================================
 # S&P 500 Collection Tests
