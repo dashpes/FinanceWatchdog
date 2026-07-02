@@ -128,6 +128,7 @@ from .shadow_operations import (
     shadow_summary,
 )
 from .insight_models import (
+    FINDING_CONGRESS_CLUSTER,
     FINDING_INSIDER_CLUSTER,
     FINDING_MULTI_SOURCE,
     ConfluenceFinding,
@@ -266,6 +267,7 @@ __all__ = [
     # Confluence / insight engine
     "ConfluenceFinding",
     "FINDING_INSIDER_CLUSTER",
+    "FINDING_CONGRESS_CLUSTER",
     "FINDING_MULTI_SOURCE",
     "save_finding",
     "finding_exists_for_date",

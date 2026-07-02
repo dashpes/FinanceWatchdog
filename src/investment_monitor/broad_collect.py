@@ -19,6 +19,7 @@ from datetime import date
 from loguru import logger
 
 from investment_monitor.collectors.base import CollectorResult
+from investment_monitor.collectors.congress import CongressTradesCollector
 from investment_monitor.collectors.insider import InsiderCollector
 from investment_monitor.collectors.material_events import MaterialEventsCollector
 from investment_monitor.collectors.news import NewsCollector
@@ -70,9 +71,12 @@ async def run_broad_collection(
         news = NewsCollector(session, settings)
         results.append(await news.collect_all())
 
-        # Congress is DEFERRED: the free House/Senate Stock Watcher feed is dead. The
-        # broad collect_all() + tests exist in CongressTradesCollector, ready to repoint
-        # at a live source (House Clerk PTR PDFs or a paid API).
+        # 4. Congressional trades from the official Senate eFD system (the free
+        #    stock-watcher S3 mirrors died; House PTRs are scanned PDFs, still
+        #    unsourced). PTRs disclose up to 45 days late, so each run sweeps a
+        #    trailing window of SUBMISSIONS and dedup makes re-sweeps no-ops.
+        congress = CongressTradesCollector(session, settings)
+        results.append(await congress.collect_all(days_back=max(7, days_back)))
 
     for r in results:
         logger.info(f"broad-collect: {r}")
