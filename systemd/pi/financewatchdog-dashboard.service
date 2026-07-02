@@ -13,6 +13,9 @@ EnvironmentFile=-@FW_HOME@/.env
 ExecStart=@FW_HOME@/.venv/bin/investment-dashboard
 Restart=always
 RestartSec=5
+# Lets the unprivileged service user bind port 80, so the GUI lives at
+# http://<host>.local with no port number (harmless when DASHBOARD_PORT > 1024).
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Read-only over the SQLite store; mutations go through the same control/blocklist/
 # tunables modules the CLI uses, gated by DASHBOARD_TOKEN. It never trades.
 MemoryMax=300M

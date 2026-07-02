@@ -36,7 +36,7 @@ writes the result into `/etc/systemd/system/`.
 | Unit | Type | Schedule (local time) | What it runs |
 |------|------|-----------------------|--------------|
 | `financewatchdog-research.service` | long-running | continuous (self-limits 18:00–06:00) | overnight data gather + confluence + thesis scoring (never trades) |
-| `financewatchdog-dashboard.service` | long-running | always on | Archie's web GUI on the LAN — `http://<pi>.local:8321` |
+| `financewatchdog-dashboard.service` | long-running | always on | Archie's web GUI on the LAN — `http://<pi>.local` |
 | `financewatchdog-trade.timer` | timer → oneshot | Mon–Fri 07:00 & 12:30 | `thesis-run` (gated by dry-run + kill-switch) |
 | `financewatchdog-summary.timer` | timer → oneshot | Mon–Fri 13:15 | `daily-summary` email |
 | `financewatchdog-prune.timer` | timer → oneshot | Sun 12:00 | retention prune + `VACUUM` |
@@ -75,7 +75,9 @@ a USB SSD instead of the SD card by setting `DATA_DIR`/`DB_PATH` in `.env`.
 ## The dashboard
 
 `financewatchdog-dashboard.service` serves Archie's web GUI to your local network at
-`http://<pi>.local:8321` (host/port via `DASHBOARD_HOST`/`DASHBOARD_PORT` in `.env`).
+`http://<pi>.local` (the installer defaults `DASHBOARD_PORT=80` in `.env`; the unit
+grants `CAP_NET_BIND_SERVICE` so the unprivileged service user can bind it. Local dev
+defaults to `:8321`).
 Pages: Overview (letter + equity curve), Theses (full narratives + monitoring),
 Ledger (orders with gate verdicts, realized P&L), Charts (candles with Archie's fills),
 Signals (confluence + insiders), The Study (calibration), System, and Settings.
