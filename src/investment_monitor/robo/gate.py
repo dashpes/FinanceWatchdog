@@ -243,8 +243,14 @@ def validate(
             )
 
     # 8b. Concentration + position-count guards on BUYS (disabled by permissive defaults).
+    # The cash ETF is a cash equivalent, not a portfolio "name": it is exempt from BOTH the
+    # per-name weight cap (it must be able to hold the whole cash sleeve, which can far exceed
+    # a single-equity cap) and the position-count cap (it must not consume or be blocked by a
+    # slot). Same treatment as raw CASH.
     if order.side is OrderSide.BUY:
-        if config.caps.max_per_name_weight < 1.0:
+        cash_etf = (config.cash_etf or "").upper()
+        is_cash_etf = order.symbol.upper() == cash_etf
+        if config.caps.max_per_name_weight < 1.0 and not is_cash_etf:
             pos = account_state.get_position(order.symbol)
             held_value = pos.market_value if pos else Decimal("0")
             cap_value = Decimal(str(config.caps.max_per_name_weight)) * account_state.total_value
@@ -254,13 +260,10 @@ def validate(
                     f"{order.symbol} post-buy value {held_value + gross_cost} exceeds "
                     f"{config.caps.max_per_name_weight:.0%} cap ({cap_value})",
                 )
-        # The cash ETF is a cash equivalent, not a portfolio "name" — it must not consume a
-        # position slot (nor be blocked by the cap), or it would crowd out a real holding.
-        cash_etf = (config.cash_etf or "").upper()
         name_positions = sum(1 for p in account_state.positions if p.symbol.upper() != cash_etf)
         if (
             config.caps.max_positions > 0
-            and order.symbol.upper() != cash_etf
+            and not is_cash_etf
             and account_state.get_position(order.symbol) is None
             and name_positions + extra_positions >= config.caps.max_positions
         ):
