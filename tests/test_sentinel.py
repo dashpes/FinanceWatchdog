@@ -91,6 +91,24 @@ def test_trips_profit_target_exit(tmp_path):
         assert {t.symbol for t in get_active_theses(s)} == {"FLAT"}
 
 
+def test_benched_thesis_not_checked(tmp_path):
+    # WATCH (benched) names are unsized; hourly quotes for them are wasted — the
+    # sentinel covers ACTIVE only, the weekly maintenance re-eval covers the bench.
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        s.add(Thesis(
+            symbol="BENCH", narrative="benched", conviction=0.1,
+            entry_conditions={"entry_price": 10.0},
+            invalidation_conditions={"price_drop_pct": 25},
+            status=ThesisStatus.WATCH.value,
+        ))
+        _seed_price(s, "BENCH", close=7.0)   # -30%: would trip if it were checked
+    out, notify = _run(Settings(), _cfg(), OPEN_NOW)
+    assert out["checked"] == 0 and out["tripped"] == [] and not notify.called
+    with get_session() as s:
+        assert get_thesis(s, "BENCH").status == ThesisStatus.WATCH.value
+
+
 def test_sentinel_maintains_high_water_mark(tmp_path):
     from investment_monitor.storage import get_all_theses
 

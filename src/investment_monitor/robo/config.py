@@ -229,6 +229,20 @@ class SizingConfig(BaseModel):
     # per-name max_position_weight cap, this yields a handful of meaningful positions with a
     # bounded top, and the rest in cash / the cash ETF. 0 keeps every positive-weight name.
     min_conviction_to_hold: float = Field(default=0.35, ge=0, le=1.0)
+    # Anti-churn hysteresis at the top-N selection cliff: a HELD incumbent keeps its slot
+    # unless a challenger's sized weight beats it by this fraction (0.25 = 25% larger).
+    # Without it, ±0.02 of LLM conviction wobble inside a saturated 0.9+ band rotated
+    # real positions daily (live account: every buy of a 21-day stretch was fully sold
+    # again within 1-6 days on "target changed", not on any broken thesis). 0 = plain
+    # top-N. Exits are never delayed: an invalidated/exited/sub-floor name has weight 0
+    # and is no incumbent at all.
+    selection_hysteresis: float = Field(
+        default=0.25, ge=0,
+        title="Selection hysteresis",
+        description="A held name keeps its top-N slot unless a challenger beats it by this margin.",
+        json_schema_extra={"x_ui": {"group": "Sizing", "control": "slider",
+                                    "min": 0.0, "max": 1.0, "step": 0.05, "unit": "fraction"}},
+    )
     # Always leave at least this fraction of the portfolio in cash (autonomous mode).
     min_cash_weight: float = Field(
         default=0.05, ge=0, lt=1.0,
@@ -331,6 +345,26 @@ class AutonomyConfig(BaseModel):
     # tripped intraday via the sentinel) re-inflating the target weight BEFORE the
     # sell so the take-profit silently never executes. 0 = off.
     reentry_cooldown_days: float = Field(default=30.0, ge=0)
+    # --- Book hygiene: the active set is a WORKING set, not an archive. -----------
+    # Promotion only ever ADDED theses (83 active after 4 weeks live; 36 below the
+    # conviction floor — never sizeable, yet each still cost a full LLM re-eval every
+    # cycle, ~4h/night on a Pi). Benching demotes them to WATCH: thesis + history kept,
+    # deterministic checks only, one LLM re-look per bench_reeval_days, auto-revived
+    # when conviction recovers or a fresh confluence finding lands.
+    # Hard cap on ACTIVE theses; the weakest (smoothed conviction) are benched. 0 = off.
+    max_active_theses: int = Field(
+        default=30, ge=0,
+        title="Max active theses",
+        description="Cap the daily-maintained book; weakest are benched to WATCH (0 = uncapped).",
+        json_schema_extra={"x_ui": {"group": "Autonomy", "control": "slider",
+                                    "min": 0, "max": 100, "step": 5}},
+    )
+    # Bench an (unsizeable) thesis once its conviction has stayed below
+    # sizing.min_conviction_to_hold for this many days. 0 disables sub-floor benching.
+    bench_after_days: float = Field(default=7.0, ge=0)
+    # Benched theses get one LLM re-evaluation this often (they keep hourly-cheap
+    # deterministic coverage only while benched).
+    bench_reeval_days: float = Field(default=7.0, gt=0)
 
 
 class LearningConfig(BaseModel):

@@ -222,7 +222,7 @@ DASH_PORT="${DASH_PORT:-8321}"
 say "Enabling services"
 "$SYSTEMCTL" enable --now financewatchdog-research.service 2>/dev/null || true
 "$SYSTEMCTL" enable --now financewatchdog-dashboard.service 2>/dev/null || true
-for t in trade summary prune sentinel; do
+for t in trade summary prune sentinel sims; do
   "$SYSTEMCTL" enable --now "financewatchdog-$t.timer" 2>/dev/null || true
 done
 # Auto-update only makes sense if the runtime user can actually pull the repo.

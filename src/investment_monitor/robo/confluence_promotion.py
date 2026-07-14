@@ -33,6 +33,7 @@ from investment_monitor.storage import (
     get_session,
     get_thesis,
     init_db,
+    record_conviction_update,
     save_thesis,
 )
 from investment_monitor.storage.shadow_models import SHADOW_SOURCE_CONFLUENCE
@@ -133,6 +134,38 @@ def promote_confluence_findings(
             continue
         existing = get_thesis(session, f.ticker, account_id)
         if existing is not None:
+            # A benched (WATCH) name revives on a genuinely NEW finding — confluence
+            # findings go stale in days, so waiting for the weekly bench re-eval would
+            # miss the trade. Same freshness rules as re-promoting an invalidated name.
+            if existing.status == ThesisStatus.WATCH.value:
+                le = existing.last_evaluated_at
+                same = (existing.evidence_refs or {}).get("confluence_finding_id") == f.id
+                stale = le is not None and f.as_of_date is not None and f.as_of_date < le.date()
+                if same or stale:
+                    _shadow_skip(session, f, "reentry_guard", account_id=account_id)
+                    continue
+                tradeable, close = _liquidity(
+                    session, f.ticker, min_price=min_price, min_dollar_volume=min_dollar_volume
+                )
+                if not tradeable or close is None:
+                    _shadow_skip(session, f, "illiquid", close=close, account_id=account_id)
+                    continue
+                conviction = max(_conviction_from_score(f.score), float(existing.conviction or 0.0))
+                existing.narrative = f.narrative
+                existing.entry_conditions = {"entry_composite": f.score, "entry_price": close}
+                existing.exit_conditions = dict(_DEFAULT_EXIT)
+                existing.evidence_refs = {"confluence_finding_id": f.id, "kind": f.kind}
+                existing.high_water_mark = None  # fresh bet: the trail restarts at re-entry
+                existing.status = ThesisStatus.ACTIVE.value
+                record_conviction_update(
+                    session, existing, conviction, trigger=f"confluence-revival:{f.kind}"
+                )
+                promoted.append(f.ticker)
+                logger.info(
+                    "revived benched {t} on a fresh confluence finding (score {s:.1f})",
+                    t=f.ticker, s=f.score,
+                )
+                continue
             if existing.status != ThesisStatus.INVALIDATED.value:
                 continue  # actively tracked — don't duplicate
             # Self-invalidated: re-promote ONLY on a genuinely fresh finding (never the
