@@ -28,6 +28,7 @@ from investment_monitor.robo.sizing import (
     compute_conviction_weights,
     decay_conviction,
     risk_from_sim,
+    select_top_positions,
     size_position,
 )
 from investment_monitor.config import Settings
@@ -74,6 +75,19 @@ def test_size_position_tail_haircut_shrinks_size():
     mild = RiskMetrics(drift=0.15, volatility=0.18, var_95=-0.05, cvar_95=-0.05)
     severe = RiskMetrics(drift=0.15, volatility=0.18, var_95=-0.40, cvar_95=-0.50)
     assert size_position(0.8, severe, SC) < size_position(0.8, mild, SC)
+
+
+def test_size_position_risk_modulates_but_never_vetoes():
+    # A beaten-down name (negative trailing drift — the classic contrarian confluence
+    # setup) must NOT size to zero on the Kelly term; it falls back to the conviction
+    # floor, still shrunk by the tail haircut.
+    down = RiskMetrics(drift=-0.05, volatility=0.45, var_95=-0.25, cvar_95=-0.30)
+    got = size_position(0.9, down, SC)
+    floor = 0.9 * SC.no_sim_weight_per_conviction
+    assert 0 < got < floor            # alive, but tail-haircut below the raw floor
+    # And a genuinely strong Sharpe still sizes ABOVE the floor (Kelly adds).
+    strong = RiskMetrics(drift=0.30, volatility=0.15, var_95=-0.05, cvar_95=-0.06)
+    assert size_position(0.9, strong, SC) > floor
 
 
 def test_decay_toward_floor():
@@ -123,6 +137,50 @@ def test_invalidation_composite_drop_boundary():
     cond = {"composite_drop": 10}
     assert check_invalidation(cond, entry_composite=100, latest_composite=90) is not None
     assert check_invalidation(cond, entry_composite=100, latest_composite=91) is None
+
+
+# --------------------------------------------------------------------------- #
+# A2. Pure top-N selection with incumbent hysteresis
+# --------------------------------------------------------------------------- #
+def test_select_top_positions_plain_topn_and_ties():
+    raw = {"A": 0.2, "B": 0.3, "C": 0.2, "D": 0.1}
+    out = select_top_positions(raw, 2)
+    assert out == {"B": 0.3, "A": 0.2}  # tie A/C breaks by symbol, never dict order
+    assert select_top_positions(raw, 0) == raw       # no cap
+    assert select_top_positions(raw, 10) == raw      # under cap
+
+
+def test_select_top_positions_incumbent_survives_noise():
+    # Held incumbent at 0.17; challenger at 0.19 is only ~12% stronger — rank noise
+    # in a saturated conviction band. The incumbent keeps its slot.
+    raw = {"INC": 0.17, "CHAL": 0.19, "TOP": 0.30}
+    out = select_top_positions(raw, 2, held={"INC"}, hysteresis=0.25)
+    assert set(out) == {"TOP", "INC"}
+    # Without hysteresis the same numbers rotate the position out.
+    out0 = select_top_positions(raw, 2, held={"INC"}, hysteresis=0.0)
+    assert set(out0) == {"TOP", "CHAL"}
+
+
+def test_select_top_positions_clear_winner_evicts():
+    raw = {"INC": 0.17, "CHAL": 0.22, "TOP": 0.30}  # 0.22 >= 0.17 * 1.25
+    out = select_top_positions(raw, 2, held={"INC"}, hysteresis=0.25)
+    assert set(out) == {"TOP", "CHAL"}
+
+
+def test_select_top_positions_weakest_incumbent_evicted_first():
+    raw = {"I1": 0.10, "I2": 0.20, "C1": 0.30, "C2": 0.14}
+    # One challenger strong enough for I1 (0.30 >= 0.125) but slots stay full:
+    # I2 survives because C2 (0.14) is under its 0.25 margin (needs 0.25).
+    out = select_top_positions(raw, 2, held={"I1", "I2"}, hysteresis=0.25)
+    assert set(out) == {"C1", "I2"}
+
+
+def test_select_top_positions_exited_incumbent_holds_no_slot():
+    # A broken/exited thesis has weight 0 -> it is not in raw at all, so hysteresis
+    # can never delay an exit.
+    raw = {"CHAL": 0.19, "TOP": 0.30}
+    out = select_top_positions(raw, 2, held={"GONE"}, hysteresis=0.25)
+    assert set(out) == {"TOP", "CHAL"}
 
 
 # --------------------------------------------------------------------------- #
@@ -556,3 +614,121 @@ def test_evaluator_exit_config_master_switch(tmp_path):
         t = get_thesis(s, "HODL")
         assert evaluator.evaluate(s, t) == "unchanged"  # exits off -> position rides
         assert t.status == ThesisStatus.ACTIVE.value
+
+
+# --------------------------------------------------------------------------- #
+# H. Book hygiene: benching + weekly re-eval + cap (run_maintenance)
+# --------------------------------------------------------------------------- #
+def _history(*points):
+    """[(days_ago, conviction), ...] -> conviction_history entries with timestamps."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return [
+        {"ts": (now - timedelta(days=d)).isoformat(), "conviction": c, "trigger": "test"}
+        for d, c in points
+    ]
+
+
+def _aged(days: float):
+    from datetime import datetime, timedelta, timezone
+
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+
+
+def test_maintenance_benches_sustained_sub_floor(tmp_path):
+    from investment_monitor.analysis.thesis_evaluator import run_maintenance
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(  # weeks of sub-floor conviction: pure LLM deadweight
+            symbol="ZOMBIE", conviction=0.1, status=ThesisStatus.ACTIVE.value,
+            created_at=_aged(30), conviction_history=_history((8, 0.1), (2, 0.1)),
+        ))
+        save_thesis(s, Thesis(  # strong name: untouched
+            symbol="GOOD", conviction=0.8, status=ThesisStatus.ACTIVE.value,
+            created_at=_aged(30), conviction_history=_history((2, 0.8)),
+        ))
+    cfg = _autonomous_config()
+    with get_session() as s:
+        counts = run_maintenance(s, ThesisEvaluator(None, cfg), cfg)
+    assert counts["benched"] == 1
+    with get_session() as s:
+        assert get_thesis(s, "ZOMBIE").status == ThesisStatus.WATCH.value
+        assert get_thesis(s, "GOOD").status == ThesisStatus.ACTIVE.value
+        assert "benched" in get_thesis(s, "ZOMBIE").conviction_history[-1]["trigger"]
+
+
+def test_maintenance_never_benches_fresh_or_recovering(tmp_path):
+    from investment_monitor.analysis.thesis_evaluator import run_maintenance
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(  # sub-floor but only 2 days old — give it time
+            symbol="FRESH", conviction=0.1, status=ThesisStatus.ACTIVE.value,
+            created_at=_aged(2), conviction_history=_history((1, 0.1)),
+        ))
+        save_thesis(s, Thesis(  # showed real strength inside the window
+            symbol="RECOV", conviction=0.1, status=ThesisStatus.ACTIVE.value,
+            created_at=_aged(30),
+            conviction_history=_history((6, 0.1), (5, 0.5), (4, 0.1), (3, 0.1),
+                                        (2, 0.1), (1, 0.1)),
+        ))
+    cfg = _autonomous_config()
+    with get_session() as s:
+        counts = run_maintenance(s, ThesisEvaluator(None, cfg), cfg)
+    assert counts["benched"] == 0
+
+
+def test_maintenance_weekly_reeval_revives_recovered_bench(tmp_path):
+    from investment_monitor.analysis.thesis_evaluator import run_maintenance
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(  # benched, due for its weekly look, conviction recovered
+            symbol="BACK", conviction=0.6, status=ThesisStatus.WATCH.value,
+            created_at=_aged(30), last_evaluated_at=_aged(8),
+        ))
+        save_thesis(s, Thesis(  # benched, looked at yesterday: stays skipped
+            symbol="WAIT", conviction=0.6, status=ThesisStatus.WATCH.value,
+            created_at=_aged(30), last_evaluated_at=_aged(1),
+        ))
+    cfg = _autonomous_config()
+    with get_session() as s:
+        counts = run_maintenance(s, ThesisEvaluator(None, cfg), cfg)
+    assert counts["revived"] == 1 and counts["skipped_benched"] == 1
+    with get_session() as s:
+        assert get_thesis(s, "BACK").status == ThesisStatus.ACTIVE.value
+        assert get_thesis(s, "WAIT").status == ThesisStatus.WATCH.value
+
+
+def test_maintenance_cap_benches_weakest(tmp_path):
+    from investment_monitor.analysis.thesis_evaluator import run_maintenance
+    from investment_monitor.robo.config import AutonomyConfig
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        for sym, conv in [("AA", 0.9), ("BB", 0.8), ("CC", 0.7), ("DD", 0.6)]:
+            save_thesis(s, Thesis(symbol=sym, conviction=conv,
+                                  status=ThesisStatus.ACTIVE.value, created_at=_aged(1)))
+    cfg = _autonomous_config().model_copy(
+        update={"autonomy": AutonomyConfig(max_active_theses=2)}
+    )
+    with get_session() as s:
+        counts = run_maintenance(s, ThesisEvaluator(None, cfg), cfg)
+    assert counts["benched"] == 2
+    with get_session() as s:
+        statuses = {t.symbol: t.status for t in
+                    [get_thesis(s, x) for x in ("AA", "BB", "CC", "DD")]}
+    assert statuses == {"AA": "active", "BB": "active", "CC": "watch", "DD": "watch"}
+
+
+def test_benched_thesis_gets_no_weight(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="LIVE", conviction=0.9, status=ThesisStatus.ACTIVE.value))
+        save_thesis(s, Thesis(symbol="BENCH", conviction=0.9, status=ThesisStatus.WATCH.value))
+    with get_session() as s:
+        weights = compute_conviction_weights(s, _autonomous_config())
+    assert weights.get("LIVE", 0) > 0
+    assert "BENCH" not in weights  # benched = tracked but never sized

@@ -29,6 +29,7 @@ from investment_monitor.robo.market_hours import is_market_open
 from investment_monitor.storage import (
     AlertSent,
     SIGNAL_ITEM_CODES,
+    ThesisStatus,
     alert_exists_by_dedup_key,
     exit_thesis,
     get_active_theses,
@@ -70,7 +71,13 @@ def run_sentinel(
     ecfg = getattr(config, "exits", None)
     exit_defaults = ecfg.as_conditions() if ecfg is not None and ecfg.enabled else None
     with get_session() as session:
-        theses = get_active_theses(session, config.account_id or None)
+        # ACTIVE only: benched (WATCH) names are unsized by definition — any held
+        # shares are already being sold toward 0 — so hourly quotes for them are
+        # wasted; they keep their weekly re-eval coverage in maintenance instead.
+        theses = [
+            t for t in get_active_theses(session, config.account_id or None)
+            if t.status == ThesisStatus.ACTIVE.value
+        ]
         if not theses:
             return {"status": "ok", "checked": 0, "tripped": [], "exited": [], "flagged": []}
         symbols = sorted({t.symbol for t in theses})

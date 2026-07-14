@@ -82,6 +82,7 @@ from .memory_operations import (
 )
 from .thesis_models import LIVE_THESIS_STATUSES, Thesis, ThesisStatus
 from .thesis_operations import (
+    bench_thesis,
     exit_thesis,
     get_active_symbols,
     get_active_theses,
@@ -234,6 +235,7 @@ __all__ = [
     "set_target_weight",
     "invalidate_thesis",
     "exit_thesis",
+    "bench_thesis",
     "update_high_water",
     "get_last_exited_thesis",
     "get_active_symbols",

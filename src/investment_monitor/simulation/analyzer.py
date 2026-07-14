@@ -355,16 +355,19 @@ class MonteCarloAnalyzer:
         if data.empty:
             raise ValueError(f"No price data available for {ticker}")
 
-        # Extract close prices
+        # Extract close prices. Newer yfinance returns MultiIndex columns even for a
+        # single ticker, making data["Close"] an (n, 1) FRAME — whose 2-D .values made
+        # np.diff produce an EMPTY array downstream, so drift/vol silently became NaN.
+        # Flatten to 1-D so both column shapes work.
         if "Close" in data.columns:
-            prices = data["Close"].dropna().values
+            prices = np.asarray(data["Close"].dropna(), dtype=np.float64).reshape(-1)
         else:
             raise ValueError(f"No Close prices in data for {ticker}")
 
         if len(prices) == 0:
             raise ValueError(f"No valid close prices for {ticker}")
 
-        return prices.astype(np.float64)
+        return prices
 
     def _calculate_beta(
         self,

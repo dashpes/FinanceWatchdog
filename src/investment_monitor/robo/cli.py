@@ -329,8 +329,8 @@ def thesis_run(
     from investment_monitor.analysis.thesis_evaluator import (
         ThesisEvaluator,
         refresh_target_weights,
+        run_maintenance,
     )
-    from investment_monitor.storage import get_active_theses
 
     settings = get_settings()
     cfg = _load_config(config)
@@ -404,15 +404,15 @@ def thesis_run(
         typer.secho(f"shadow ledger maintenance skipped: {exc}", fg=typer.colors.YELLOW)
 
     # 2. Maintain existing theses (deterministic invalidation, then LLM re-eval).
+    #    ACTIVE names daily; benched (WATCH) names weekly; weakest overflow benched.
     if not skip_maintenance:
-        actions = {"invalidated": 0, "exited": 0, "updated": 0, "unchanged": 0}
         with get_session() as session:
-            for thesis in get_active_theses(session, acct):
-                actions[evaluator.evaluate(session, thesis, account_id=acct)] += 1
+            actions = run_maintenance(session, evaluator, auto_cfg, account_id=acct)
         typer.echo(
             f"Thesis maintenance: {actions['updated']} updated, "
             f"{actions['invalidated']} invalidated, {actions['exited']} exited (profit/horizon), "
-            f"{actions['unchanged']} unchanged"
+            f"{actions['unchanged']} unchanged, {actions['benched']} benched, "
+            f"{actions['revived']} revived ({actions['skipped_benched']} benched skipped)"
         )
 
     # 3. Recompute sized target weights from current convictions.
@@ -749,6 +749,75 @@ def backtest(
     if not s["n_trades"]:
         typer.echo("No trades — likely not enough insider/price history ingested "
                    "for this window.")
+
+
+@app.command("simulate-book")
+def simulate_book(
+    top: int = typer.Option(20, "--top", help="How many of the strongest active theses to simulate"),
+    config: Path = typer.Option(None, "--config", "-c", help="Config directory"),
+) -> None:
+    """Refresh Monte-Carlo risk sims for the book's strongest names (weekly cron).
+
+    Without a stored simulation, sizing falls back to the flat no-sim floor
+    (conviction x no_sim_weight_per_conviction) — the Kelly/CVaR risk layer never
+    engages. This runs the same analyzer the research pipeline uses, for the top
+    active theses by sized weight/conviction. Price history comes from yfinance at
+    sim time, so DB retention does not bound it. Fail-soft per ticker.
+    """
+    import yfinance as yf
+
+    from investment_monitor.simulation.analyzer import MonteCarloAnalyzer
+    from investment_monitor.simulation.models import SimulationConfig
+    from investment_monitor.storage import (
+        ThesisStatus,
+        get_active_theses,
+        get_candidate_by_ticker,
+        save_simulation_result,
+    )
+
+    settings = get_settings()
+    cfg = _load_config(config)
+    init_db(settings.db_path)
+
+    with get_session() as session:
+        theses = [
+            t for t in get_active_theses(session, cfg.account_id or None)
+            if t.status == ThesisStatus.ACTIVE.value
+        ]
+        theses.sort(key=lambda t: (-(t.target_weight or 0.0), -(t.conviction or 0.0), t.symbol))
+        symbols = list(dict.fromkeys(t.symbol for t in theses))[:max(1, top)]
+
+    if not symbols:
+        typer.echo("No active theses to simulate.")
+        return
+
+    analyzer = MonteCarloAnalyzer(config=SimulationConfig())
+    done = failed = 0
+    for symbol in symbols:
+        try:
+            info = yf.Ticker(symbol).info
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+            if not price:
+                typer.secho(f"  {symbol}: no current price; skipped", fg=typer.colors.YELLOW)
+                failed += 1
+                continue
+            with get_session() as session:
+                candidate = get_candidate_by_ticker(session, symbol)
+                score = float(candidate.composite_score or 0.0) if candidate else 0.0
+            # force=True: book names are held on thesis conviction, not the research
+            # score gate — a sim must exist for every name sizing may select.
+            output = analyzer.analyze(
+                ticker=symbol, entry_price=float(price), composite_score=score, force=True
+            )
+            with get_session() as session:
+                save_simulation_result(session, output)
+                session.commit()
+            done += 1
+            typer.echo(f"  {symbol}: simulated @ ${float(price):.2f}")
+        except Exception as exc:  # noqa: BLE001 - one bad ticker must not stop the sweep
+            failed += 1
+            typer.secho(f"  {symbol}: sim failed ({exc})", fg=typer.colors.YELLOW)
+    typer.echo(f"Simulated {done}/{len(symbols)} book names ({failed} failed).")
 
 
 @app.command("sentinel")

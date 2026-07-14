@@ -1,0 +1,15 @@
+[Unit]
+Description=FinanceWatchdog robo — weekly Monte-Carlo risk sims for the book
+Documentation=https://github.com/dashpes/FinanceWatchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@FW_USER@
+WorkingDirectory=@FW_HOME@
+Environment=FW_HOME=@FW_HOME@
+EnvironmentFile=-@FW_HOME@/.env
+# Refreshes simulation_results for the strongest active theses so conviction sizing
+# uses the Kelly/CVaR risk layer instead of the flat no-sim fallback. Never trades.
+ExecStart=@FW_HOME@/scripts/robo-cron.sh simulate-book --top 20

@@ -207,7 +207,12 @@ class RoboProposer:
 
         # Base target allocation: conviction-driven (autonomous) or fixed (rebalance).
         if autonomous:
-            base_alloc = compute_conviction_weights(session, self._config, account_id=account_id)
+            base_alloc = compute_conviction_weights(
+                session, self._config, account_id=account_id,
+                # Held names get selection hysteresis: an incumbent position is only
+                # rotated out by a clearly stronger challenger, never by rank noise.
+                held_symbols={p.symbol for p in account_state.positions},
+            )
             # Held names with no live thesis are trimmed to 0 so they get sold.
             for p in account_state.positions:
                 base_alloc.setdefault(p.symbol, 0.0)

@@ -97,6 +97,9 @@ sizing:
   conviction_half_life_days: 30.0 # conviction decays toward the floor with this half-life
   conviction_floor: 0.5           # decay target (neutral) absent fresh confirming evidence
   min_cash_weight: 0.05           # always keep at least this fraction in cash
+  selection_hysteresis: 0.25      # a HELD name keeps its top-N slot unless a challenger's
+                                  # weight beats it by this margin (0 = plain top-N; stops
+                                  # LLM conviction wobble from rotating real positions)
 
 # Autonomous stock selection (Phase 4, used only when mode: autonomous). When
 # enabled, names from the research discovery funnel whose composite score clears
@@ -109,6 +112,12 @@ autonomy:
   require_buy_recommendation: false  # also require a buy/strong_buy research report
   reentry_cooldown_days: 30.0     # after a take-profit/horizon EXIT, don't re-promote
                                   # the same name for this many days (0 = off)
+  # Book hygiene: the active set is a working set, not an archive. Sub-floor names
+  # are BENCHED to watch (kept + weekly LLM re-look, auto-revive on recovery or a
+  # fresh confluence finding) so a growing book can't starve the schedule.
+  max_active_theses: 30           # hard cap on daily-maintained theses (0 = uncapped)
+  bench_after_days: 7.0           # bench after this long below min_conviction_to_hold
+  bench_reeval_days: 7.0          # benched names get one LLM re-evaluation this often
 
 # Deterministic take-profit exits — the upside twin of invalidation. These are the
 # DEFAULT thresholds for every live thesis; a thesis's own exit_conditions (stamped

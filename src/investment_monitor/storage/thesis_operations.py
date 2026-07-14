@@ -103,6 +103,22 @@ def exit_thesis(session: Session, thesis: Thesis, reason: str) -> None:
     session.flush()
 
 
+def bench_thesis(session: Session, thesis: Thesis, reason: str) -> None:
+    """Demote a thesis to WATCH (benched): keep it and its history, stop sizing it.
+
+    NOT an exit — conviction is preserved as the revival signal. A benched name gets
+    one LLM re-look per ``autonomy.bench_reeval_days`` and returns to ACTIVE when its
+    conviction recovers over the floor (or a fresh confluence finding revives it).
+    """
+    history = list(thesis.conviction_history or [])
+    history.append({"ts": _utcnow().isoformat(), "conviction": thesis.conviction,
+                    "trigger": f"benched: {reason}"})
+    thesis.conviction_history = history
+    thesis.target_weight = 0.0
+    thesis.status = ThesisStatus.WATCH.value
+    session.flush()
+
+
 def update_high_water(session: Session, thesis: Thesis, price: float | None) -> None:
     """Monotonically raise the thesis's high-water mark (no-op on None/lower prices)."""
     if price is None or price <= 0:

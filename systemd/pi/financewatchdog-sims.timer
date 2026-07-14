@@ -1,0 +1,12 @@
+[Unit]
+Description=FinanceWatchdog robo — weekly sim refresh schedule (Sun 10:00, local time)
+Documentation=https://github.com/dashpes/FinanceWatchdog
+
+[Timer]
+# Local time (Pi TZ = America/Los_Angeles). Sunday mid-morning: market closed, the
+# overnight research window is over, and fresh sims are in place for Monday's runs.
+OnCalendar=Sun 10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

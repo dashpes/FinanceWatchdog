@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -34,6 +34,7 @@ from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
     accuracy_stats_for_symbol,
+    bench_thesis,
     exit_thesis,
     get_latest_price,
     get_latest_report,
@@ -491,3 +492,129 @@ def refresh_target_weights(session: "Session", config: "RoboConfig", *, account_
     weights = compute_conviction_weights(session, config, account_id=account_id)
     for thesis in get_active_theses(session, account_id):
         set_target_weight(session, thesis, weights.get(thesis.symbol, 0.0))
+
+
+# --------------------------------------------------------------------------- #
+# Book hygiene: the active set is a WORKING set, not an archive
+# --------------------------------------------------------------------------- #
+def _sustained_sub_floor(thesis: Thesis, config: "RoboConfig", now: datetime) -> bool:
+    """Pure-ish: has this thesis been unsizeable (below the conviction floor) so long
+    that daily LLM maintenance is wasted on it?
+
+    True only when the SMOOTHED conviction (the same value sizing gates on) is below
+    ``min_conviction_to_hold`` AND no recorded conviction point inside the last
+    ``bench_after_days`` reached the floor AND the thesis is at least that old — so a
+    fresh promotion or a brief dip is never benched.
+    """
+    from investment_monitor.robo.sizing import _sizing_conviction
+
+    acfg = config.autonomy
+    if acfg.bench_after_days <= 0:
+        return False
+    floor = config.sizing.min_conviction_to_hold
+    if _sizing_conviction(thesis, config.sizing) >= floor:
+        return False
+    created = thesis.created_at
+    if created is None:
+        return False
+    created = created.replace(tzinfo=None) if created.tzinfo else created
+    if (now - created).total_seconds() < acfg.bench_after_days * 86400:
+        return False
+    cutoff = now - timedelta(days=acfg.bench_after_days)
+    for point in thesis.conviction_history or []:
+        if not isinstance(point, dict):
+            continue
+        ts = point.get("ts")
+        try:
+            when = datetime.fromisoformat(str(ts)) if ts else None
+        except ValueError:
+            when = None
+        if when is not None and when.tzinfo:
+            when = when.replace(tzinfo=None)
+        # Points without a timestamp predate the window bookkeeping — ignore them.
+        if when is None or when < cutoff:
+            continue
+        try:
+            if float(point.get("conviction", 0.0)) >= floor:
+                return False  # showed real strength inside the window
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
+def run_maintenance(
+    session: "Session",
+    evaluator: ThesisEvaluator,
+    config: "RoboConfig",
+    *,
+    account_id: str | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """One maintenance pass over the live book. Returns action counts.
+
+    ACTIVE theses get the full daily ``evaluate`` (invalidation -> take-profit ->
+    LLM). A name that has stayed below the conviction floor for
+    ``autonomy.bench_after_days`` is BENCHED to WATCH — kept, but out of the daily
+    LLM rotation, so an ever-growing book can't starve the schedule (83 theses x a
+    14B model = ~4h/pass on a Pi). Benched theses are re-evaluated only every
+    ``autonomy.bench_reeval_days`` and return to ACTIVE when conviction recovers.
+    Finally the ``autonomy.max_active_theses`` cap benches the weakest overflow.
+
+    Benching never touches positions: a sub-floor name gets no capital either way,
+    so its held shares (if any) are already being sold toward 0 by the sizing floor.
+    """
+    from investment_monitor.robo.sizing import _sizing_conviction
+
+    now = now or _utcnow_naive()
+    acfg = config.autonomy
+    floor = config.sizing.min_conviction_to_hold
+    counts = {"invalidated": 0, "exited": 0, "updated": 0, "unchanged": 0,
+              "benched": 0, "revived": 0, "skipped_benched": 0}
+
+    from investment_monitor.storage import get_active_theses
+
+    live = get_active_theses(session, account_id)
+    active = [t for t in live if t.status == ThesisStatus.ACTIVE.value]
+    benched = [t for t in live if t.status == ThesisStatus.WATCH.value]
+
+    for thesis in active:
+        counts[evaluator.evaluate(session, thesis, account_id=account_id)] += 1
+        if thesis.status == ThesisStatus.ACTIVE.value and _sustained_sub_floor(thesis, config, now):
+            bench_thesis(
+                session, thesis,
+                f"conviction below {floor:.2f} for {acfg.bench_after_days:g}d",
+            )
+            counts["benched"] += 1
+
+    for thesis in benched:
+        le = thesis.last_evaluated_at
+        if le is not None:
+            le = le.replace(tzinfo=None) if le.tzinfo else le
+            if (now - le).total_seconds() < acfg.bench_reeval_days * 86400:
+                counts["skipped_benched"] += 1
+                continue
+        action = evaluator.evaluate(session, thesis, account_id=account_id)
+        counts[action] += 1
+        if (
+            thesis.status == ThesisStatus.WATCH.value
+            and _sizing_conviction(thesis, config.sizing) >= floor
+        ):
+            thesis.status = ThesisStatus.ACTIVE.value
+            session.flush()
+            counts["revived"] += 1
+            logger.info("thesis {s} revived from the bench", s=thesis.symbol)
+
+    # Hard cap: the book is a working set. Weakest overflow goes to the bench.
+    if acfg.max_active_theses and acfg.max_active_theses > 0:
+        actives = [
+            t for t in get_active_theses(session, account_id)
+            if t.status == ThesisStatus.ACTIVE.value
+        ]
+        overflow = len(actives) - acfg.max_active_theses
+        if overflow > 0:
+            actives.sort(key=lambda t: (_sizing_conviction(t, config.sizing), t.symbol))
+            for thesis in actives[:overflow]:
+                bench_thesis(session, thesis, f"book over max_active_theses ({acfg.max_active_theses})")
+                counts["benched"] += 1
+
+    return counts

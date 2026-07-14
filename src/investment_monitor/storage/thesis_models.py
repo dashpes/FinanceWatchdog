@@ -22,7 +22,10 @@ class ThesisStatus(str, Enum):
 
     DRAFT = "draft"              # generated, not yet eligible to size/trade
     ACTIVE = "active"           # live, drives target weight
-    WATCH = "watch"             # held but conviction softening / under review
+    # Benched: thesis + history kept, but no capital, no daily LLM re-eval and no
+    # sentinel coverage — one LLM re-look per autonomy.bench_reeval_days, auto-revived
+    # when conviction recovers over the floor or a fresh confluence finding lands.
+    WATCH = "watch"
     INVALIDATED = "invalidated"  # an invalidation condition fired -> force-exit candidate
     EXITED = "exited"           # position closed; kept for memory/audit
 

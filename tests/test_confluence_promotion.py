@@ -130,6 +130,55 @@ def test_promoted_thesis_carries_horizon_exit(tmp_path):
         assert get_active_theses(s)[0].exit_conditions == {"max_hold_days": 90}
 
 
+def test_fresh_finding_revives_benched_thesis(tmp_path):
+    # Confluence findings go stale in days — a benched (WATCH) name must revive on a
+    # genuinely NEW finding instead of waiting out its weekly bench re-eval.
+    from investment_monitor.storage import (
+        Thesis, ThesisStatus, get_recent_findings, get_thesis, save_thesis,
+    )
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="NAPS", narrative="old story", conviction=0.2,
+            status=ThesisStatus.WATCH.value,
+            evidence_refs={"confluence_finding_id": 999_999},  # some OLD finding
+        ))
+        _seed_finding(s, "NAPS", 8.0)
+        _seed_price(s, "NAPS")
+    with get_session() as s:
+        assert promote_confluence_findings(s, min_score=4.0) == ["NAPS"]
+        t = get_thesis(s, "NAPS")
+        assert t.status == ThesisStatus.ACTIVE.value
+        assert t.conviction >= 0.8  # refreshed from the new finding's score
+        assert t.exit_conditions == {"max_hold_days": 90}
+        assert "confluence-revival" in t.conviction_history[-1]["trigger"]
+        f = get_recent_findings(s, min_score=4.0, max_age_days=3)[0]
+        assert (t.evidence_refs or {}).get("confluence_finding_id") == f.id
+
+
+def test_same_finding_does_not_revive_benched_thesis(tmp_path):
+    from datetime import datetime
+
+    from investment_monitor.storage import (
+        Thesis, ThesisStatus, get_recent_findings, get_thesis, save_thesis,
+    )
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "STUCK", 8.0)
+        _seed_price(s, "STUCK")
+    with get_session() as s:
+        f = get_recent_findings(s, min_score=4.0, max_age_days=3)[0]
+        save_thesis(s, Thesis(
+            symbol="STUCK", narrative="x", conviction=0.2,
+            status=ThesisStatus.WATCH.value,
+            evidence_refs={"confluence_finding_id": f.id},
+            last_evaluated_at=datetime.combine(TODAY, datetime.min.time()),
+        ))
+    with get_session() as s:
+        assert promote_confluence_findings(s, min_score=4.0) == []
+        assert get_thesis(s, "STUCK").status == ThesisStatus.WATCH.value
+
+
 def test_exited_name_not_repromoted_from_same_finding(tmp_path):
     # After a take-profit/horizon exit, the SAME finding must not churn the sell
     # straight back into a buy; only a genuinely NEW finding may re-enter.

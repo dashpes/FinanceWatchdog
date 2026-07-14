@@ -132,20 +132,26 @@ def size_position(conviction: float, risk: RiskMetrics | None, cfg: SizingConfig
 
     * No conviction -> no weight.
     * No simulation -> a conservative conviction-proportional floor size.
-    * Otherwise: fractional-Kelly on a Sharpe signal, then a tail-risk haircut that
-      shrinks the size as 90d CVaR (expected shortfall) deepens.
+    * Otherwise the risk layer MODULATES conviction but never vetoes it:
+      ``max(fractional-Kelly-on-Sharpe, conviction floor) x CVaR tail-haircut``.
+      A strong trailing Sharpe sizes a name UP past the floor; a weak/negative one
+      cannot zero a live thesis — confluence entries are contrarian by construction
+      (insiders cluster-buy beaten-down names), so trailing drift argues against
+      exactly the setups the system exists to trade. Tail risk still shrinks every
+      size: deeper 90d CVaR (expected shortfall) -> smaller position.
     """
     conviction = _clamp01(conviction)
     if conviction <= 0:
         return 0.0
+    floor = conviction * cfg.no_sim_weight_per_conviction
     if risk is None:
-        return _clamp(conviction * cfg.no_sim_weight_per_conviction, 0.0, cfg.max_position_weight)
+        return _clamp(floor, 0.0, cfg.max_position_weight)
 
     sharpe = (risk.drift - cfg.risk_free) / max(risk.volatility, cfg.min_vol)
-    raw = conviction * cfg.kelly_fraction * max(sharpe, 0.0)
+    kelly = conviction * cfg.kelly_fraction * max(sharpe, 0.0)
     # More downside (larger |CVaR|) -> smaller size.
     tail_haircut = 1.0 / (1.0 + cfg.cvar_aversion * abs(risk.cvar_95))
-    return _clamp(raw * tail_haircut, 0.0, cfg.max_position_weight)
+    return _clamp(max(kelly, floor) * tail_haircut, 0.0, cfg.max_position_weight)
 
 
 def accuracy_multiplier(
@@ -168,6 +174,50 @@ def accuracy_multiplier(
         return 1.0
     hit_rate = float(stats.get("ewma_hit_rate", stats.get("hit_rate", 0.5)))
     return _clamp(1.0 + accuracy_weight * (hit_rate - 0.5) * 2.0, floor, ceiling)
+
+
+def select_top_positions(
+    raw: dict[str, float],
+    max_positions: int,
+    *,
+    held: set[str] | frozenset[str] = frozenset(),
+    hysteresis: float = 0.0,
+) -> dict[str, float]:
+    """Pure: choose which names keep capital when the book exceeds ``max_positions``.
+
+    Plain top-N by weight — except a HELD incumbent keeps its slot unless a
+    challenger's weight beats it by ``hysteresis`` (0.25 = 25% larger). In a
+    saturated conviction band the raw ranking moves on LLM noise; without a margin,
+    rank-8-vs-9 flips a real position every day (sell EML after 1 day, rebuy later).
+    Exits are never delayed: a broken/exited/sub-floor name has no weight, so it is
+    not in ``raw`` and holds no slot. Ties break by symbol so dict order never
+    decides capital.
+    """
+    if not max_positions or max_positions <= 0 or len(raw) <= max_positions:
+        return dict(raw)
+    ranked = sorted(raw.items(), key=lambda kv: (-kv[1], kv[0]))
+    if hysteresis <= 0 or not held:
+        return dict(ranked[:max_positions])
+
+    incumbents = [(s, w) for s, w in ranked if s in held][:max_positions]
+    challengers = [(s, w) for s, w in ranked if s not in held]
+    kept = dict(incumbents)
+    # Fill the slots incumbents don't use with the strongest challengers outright.
+    free = max_positions - len(incumbents)
+    kept.update(challengers[:free])
+    # Remaining challengers may only EVICT an incumbent by a clear margin,
+    # strongest challenger against weakest incumbent first.
+    remaining = challengers[free:]
+    ci = 0
+    for symbol, weight in sorted(incumbents, key=lambda kv: (kv[1], kv[0])):
+        if ci >= len(remaining):
+            break
+        ch_symbol, ch_weight = remaining[ci]
+        if ch_weight >= weight * (1.0 + hysteresis):
+            del kept[symbol]
+            kept[ch_symbol] = ch_weight
+            ci += 1
+    return kept
 
 
 def is_averaging_up_without_support(
@@ -252,13 +302,16 @@ def compute_conviction_weights(
     *,
     account_id: str | None = None,
     now: datetime | None = None,
+    held_symbols: set[str] | None = None,
 ) -> dict[str, float]:
     """Build a target allocation from live theses (autonomous mode).
 
-    Reads ACTIVE/WATCH theses, applies conviction time-decay, sizes each with the
-    latest simulation's risk metrics, caps total equity at ``1 - min_cash_weight``
-    (scaling down proportionally if over), and lets CASH absorb the remainder.
-    Returns ``{symbol: weight}`` summing to 1.0, always including CASH.
+    Reads ACTIVE theses (WATCH = benched: kept + monitored but never sized), applies
+    conviction time-decay, sizes each with the latest simulation's risk metrics, caps
+    total equity at ``1 - min_cash_weight`` (scaling down proportionally if over), and
+    lets CASH absorb the remainder. Returns ``{symbol: weight}`` summing to 1.0,
+    always including CASH. ``held_symbols`` (when the caller knows the account state)
+    enables selection hysteresis so noise can't rotate real positions.
     """
     now = now or datetime.now(timezone.utc)
     cfg = config.sizing
@@ -267,6 +320,10 @@ def compute_conviction_weights(
 
     raw: dict[str, float] = {}
     for thesis in get_active_theses(session, account_id):
+        # Benched (WATCH) theses stay tracked but get NO capital — otherwise the
+        # over-cap bench below would be undone right here on the next sizing pass.
+        if str(getattr(thesis, "status", "") or "").lower() != "active":
+            continue
         # Smooth the raw (noisy, ~45-min) re-eval conviction so sizing moves on SUSTAINED
         # thesis changes, not intraday wobble.
         smoothed = _sizing_conviction(thesis, cfg)
@@ -292,9 +349,12 @@ def compute_conviction_weights(
 
     # Concentration cap: keep only the top-N names by size, so a long tail of small theses
     # doesn't spread the book thin (the rest of the intended equity falls to cash/the ETF).
-    max_positions = config.caps.max_positions
-    if max_positions and max_positions > 0 and len(raw) > max_positions:
-        raw = dict(sorted(raw.items(), key=lambda kv: kv[1], reverse=True)[:max_positions])
+    # Held incumbents get hysteresis so a ±0.02 conviction wobble can't flip a position.
+    raw = select_top_positions(
+        raw, config.caps.max_positions,
+        held=held_symbols or frozenset(),
+        hysteresis=cfg.selection_hysteresis,
+    )
 
     # Keep at least min_cash_weight in cash: scale equity down proportionally if over.
     total = sum(raw.values())
@@ -323,6 +383,7 @@ __all__ = [
     "decay_conviction",
     "smoothed_conviction",
     "size_position",
+    "select_top_positions",
     "accuracy_multiplier",
     "is_averaging_up_without_support",
     "compute_conviction_weights",
