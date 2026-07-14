@@ -52,7 +52,16 @@ restart_ollama() {
 # reruns them anyway, so waiting would just queue redundant cycles.
 LOCK="$PROJ/logs/robo-cron.lock"
 WAIT_SECS=0
+# Read-only commands neither touch the broker nor place orders, so they must NOT be
+# gated on the single-run lock. daily-summary fires at 13:15, when the continuous
+# research loop is almost always mid-cycle holding the lock; because the summary was a
+# skip-immediately command, it lost that race every single day — and a skip sends no
+# email, so the operator kept seeing the last PAPER-era summary for weeks after the
+# bot had already gone live. Running it lock-free is safe: it reads account state
+# (via a dry-run broker) and the DB only, never writing orders.
+NEED_LOCK=1
 case " $* " in
+  *" daily-summary "*) NEED_LOCK=0 ;;            # read-only reporting: never blocks, never waits
   *" thesis-run "*|*" run "*)
     case " $* " in
       *" --no-trade "*) ;;                       # research-only: skip, don't queue
@@ -70,38 +79,42 @@ notify_error(get_settings(), message=sys.argv[1])
 PYEOF
 }
 
-deadline=$(( $(date +%s) + WAIT_SECS ))
-waited=0
-while :; do
-  if [ -d "$LOCK" ]; then
-    holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-      if [ "$(date +%s)" -lt "$deadline" ] && [ "$WAIT_SECS" -gt 0 ]; then
-        [ "$waited" = 0 ] && log "run (pid $holder) active; waiting up to ${WAIT_SECS}s for the lock ($*)"
-        waited=1; sleep 30; continue
+if [ "$NEED_LOCK" = 1 ]; then
+  deadline=$(( $(date +%s) + WAIT_SECS ))
+  waited=0
+  while :; do
+    if [ -d "$LOCK" ]; then
+      holder="$(cat "$LOCK/pid" 2>/dev/null || true)"
+      if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+        if [ "$(date +%s)" -lt "$deadline" ] && [ "$WAIT_SECS" -gt 0 ]; then
+          [ "$waited" = 0 ] && log "run (pid $holder) active; waiting up to ${WAIT_SECS}s for the lock ($*)"
+          waited=1; sleep 30; continue
+        fi
+        if [ "$WAIT_SECS" -gt 0 ]; then
+          log "gave up waiting ${WAIT_SECS}s for lock held by pid $holder; skipping ($*)"
+          notify_skip "Scheduled run '$*' was SKIPPED: another run (pid $holder) held the lock for over ${WAIT_SECS}s."
+        else
+          log "another run (pid $holder) is active; skipping ($*)"
+        fi
+        exit 0
       fi
-      if [ "$WAIT_SECS" -gt 0 ]; then
-        log "gave up waiting ${WAIT_SECS}s for lock held by pid $holder; skipping ($*)"
-        notify_skip "Scheduled run '$*' was SKIPPED: another run (pid $holder) held the lock for over ${WAIT_SECS}s."
-      else
-        log "another run (pid $holder) is active; skipping ($*)"
+      if [ -z "$holder" ] && [ -z "$(find "$LOCK" -mmin +180 2>/dev/null)" ]; then
+        log "lock present without a live holder but recent; skipping ($*)"; exit 0
       fi
-      exit 0
+      log "clearing stale lock (holder pid ${holder:-none} not alive)"; rm -rf "$LOCK" 2>/dev/null || true
     fi
-    if [ -z "$holder" ] && [ -z "$(find "$LOCK" -mmin +180 2>/dev/null)" ]; then
-      log "lock present without a live holder but recent; skipping ($*)"; exit 0
+    if mkdir "$LOCK" 2>/dev/null; then
+      break
     fi
-    log "clearing stale lock (holder pid ${holder:-none} not alive)"; rm -rf "$LOCK" 2>/dev/null || true
-  fi
-  if mkdir "$LOCK" 2>/dev/null; then
-    break
-  fi
-  # Lost a race with another starter; loop re-evaluates (waits or skips as above).
-  sleep 1
-done
-[ "$waited" = 1 ] && log "lock acquired after waiting ($*)"
-echo "$$" > "$LOCK/pid"
-trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
+    # Lost a race with another starter; loop re-evaluates (waits or skips as above).
+    sleep 1
+  done
+  [ "$waited" = 1 ] && log "lock acquired after waiting ($*)"
+  echo "$$" > "$LOCK/pid"
+  trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT
+else
+  log "read-only ($*); running without the run-lock"
+fi
 
 # --- Ollama health check (supervisor restarts crashes; this catches a wedged one) -
 if ! curl -sf --max-time 5 "${OLLAMA_HOST:-http://localhost:11434}/api/tags" >/dev/null 2>&1; then
