@@ -3,9 +3,10 @@
 Replays whatever insider + price history is in the DB through the REAL production
 scoring (``score_confluence`` via ``gather_insider_evidence``) and the same
 promotion guards (score floor, run-up, liquidity) and exit policy (drawdown trip,
-horizon close) as-of each historical date — so the tunables that are currently
-vibes (promotion ``min_score``, the conviction band, the 25% drawdown trip) get an
-empirical report card. Depth of history = whatever was ingested (EDGAR daily
+horizon close, and the optional profit-target / trailing-stop take-profit policies)
+as-of each historical date — so the tunables that are currently vibes (promotion
+``min_score``, the conviction band, the 25% drawdown trip, the exit thresholds) get
+an empirical report card. Depth of history = whatever was ingested (EDGAR daily
 indexes go back decades; ``insider.collect_all(days_back=N)`` backfills).
 
 Fidelity notes:
@@ -43,6 +44,7 @@ DEFAULT_MIN_PRICE = 3.0
 DEFAULT_MIN_DOLLAR_VOLUME = 250_000.0
 DEFAULT_DRAWDOWN_EXIT_PCT = 25.0
 DEFAULT_HORIZON_DAYS = 90
+DEFAULT_TRAILING_ARM_PCT = 10.0
 
 
 @dataclass
@@ -53,9 +55,12 @@ class BacktestTrade:
     score: float
     entry_date: date
     entry_price: float
+    # Highest close seen since entry (drives the trailing stop; never look-ahead).
+    high_water: float = 0.0
     exit_date: date | None = None
     exit_price: float | None = None
-    exit_reason: str | None = None  # horizon | drawdown | end_of_data
+    # horizon | drawdown | profit_target | trailing_stop | end_of_data
+    exit_reason: str | None = None
 
     @property
     def ret(self) -> float | None:
@@ -205,8 +210,17 @@ def run_confluence_backtest(
     min_dollar_volume: float = DEFAULT_MIN_DOLLAR_VOLUME,
     drawdown_exit_pct: float = DEFAULT_DRAWDOWN_EXIT_PCT,
     horizon_days: int = DEFAULT_HORIZON_DAYS,
+    profit_target_pct: float | None = None,
+    trailing_stop_pct: float | None = None,
+    trailing_arm_pct: float = DEFAULT_TRAILING_ARM_PCT,
 ) -> BacktestResult:
-    """Replay confluence scoring + promotion + exits over [start, end]."""
+    """Replay confluence scoring + promotion + exits over [start, end].
+
+    ``profit_target_pct`` / ``trailing_stop_pct`` are optional TAKE-PROFIT policies
+    (None = off, reproducing the original drawdown+horizon behaviour exactly). The
+    trailing stop tracks the highest close since entry and only ARMS once the gain
+    reaches ``trailing_arm_pct`` — below that, only the entry-based drawdown applies.
+    """
     config = config or ConfluenceConfig()
     result = BacktestResult(start=start, end=end)
     open_trades: dict[str, BacktestTrade] = {}
@@ -218,16 +232,30 @@ def run_confluence_backtest(
 
             # --- exits first (no same-day flip-flop with entries) ---------------
             for ticker, trade in list(open_trades.items()):
-                prices = _prices_asof(session, ticker, as_of, days=10)
+                prices = _prices_asof(session, ticker, as_of, days=max(10, step_days + 5))
                 latest = next((p for p in prices if p.close), None)
                 if latest is None:
                     continue
                 px = float(latest.close)
+                # High-water mark from post-entry closes only (never pre-entry history).
+                post_entry = [float(p.close) for p in prices
+                              if p.close and p.date >= trade.entry_date]
+                trade.high_water = max([trade.high_water, *post_entry])
                 drawdown = (trade.entry_price - px) / trade.entry_price * 100.0
+                gain = (px / trade.entry_price - 1.0) * 100.0
+                hwm_gain = (trade.high_water / trade.entry_price - 1.0) * 100.0
                 held = (as_of - trade.entry_date).days
                 reason = None
                 if drawdown >= drawdown_exit_pct:
                     reason = "drawdown"
+                elif profit_target_pct is not None and gain >= profit_target_pct:
+                    reason = "profit_target"
+                elif (
+                    trailing_stop_pct is not None
+                    and hwm_gain >= trailing_arm_pct
+                    and px <= trade.high_water * (1.0 - trailing_stop_pct / 100.0)
+                ):
+                    reason = "trailing_stop"
                 elif held >= horizon_days:
                     reason = "horizon"
                 if reason:
@@ -280,7 +308,7 @@ def run_confluence_backtest(
                     continue
                 trade = BacktestTrade(
                     ticker=ticker, score=round(stats["score"], 3),
-                    entry_date=fill_date, entry_price=fill_px,
+                    entry_date=fill_date, entry_price=fill_px, high_water=fill_px,
                 )
                 open_trades[ticker] = trade
                 result.trades.append(trade)

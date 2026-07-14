@@ -11,6 +11,7 @@ Safety guards (this trades REAL money on a small live account):
 - recency window: only act on fresh findings (never a stale multi-week-old one);
 - score-ranked + one-per-ticker, so the cap promotes the genuinely strongest;
 - falling-knife guard: a self-invalidated name is re-promoted only on a NEW finding;
+- churn guard: a profit-/horizon-EXITED name likewise re-enters only on a NEW finding;
 - liquidity floor: skip sub-$min_price / thin-dollar-volume / stale-price shells;
 - already-ran filter: skip names already up big (the signal is priced in);
 - sizing/caps/gate still bound every resulting order downstream.
@@ -25,6 +26,7 @@ from loguru import logger
 from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
+    get_last_exited_thesis,
     get_latest_price,
     get_prices,
     get_recent_findings,
@@ -38,6 +40,10 @@ from investment_monitor.storage.shadow_operations import record_shadow_entry
 
 # Exit if the insiders' bet sours (their cluster thesis failed).
 _DEFAULT_INVALIDATION = {"price_drop_pct": 25}
+# Insider-cluster edge has a shelf life: time-box the bet at the walk-forward
+# backtest's validated horizon. Profit target / trailing stop come from the
+# config-level ExitConfig defaults; this per-thesis stamp only adds the horizon.
+_DEFAULT_EXIT = {"max_hold_days": 90}
 
 
 def _shadow_skip(
@@ -142,6 +148,17 @@ def promote_confluence_findings(
             if same_finding or stale:
                 _shadow_skip(session, f, "reentry_guard", account_id=account_id)
                 continue
+        # Recently EXITED (profit taken / horizon passed): re-enter ONLY on a genuinely
+        # NEW finding — never the same/older signal that drove the position just closed,
+        # which would churn a sell straight back into a buy.
+        prior_exit = get_last_exited_thesis(session, f.ticker, account_id)
+        if prior_exit is not None:
+            le = prior_exit.last_evaluated_at
+            same_finding = (prior_exit.evidence_refs or {}).get("confluence_finding_id") == f.id
+            stale = le is not None and f.as_of_date is not None and f.as_of_date < le.date()
+            if same_finding or stale:
+                _shadow_skip(session, f, "reentry_guard", account_id=account_id)
+                continue
         # Already run up big since the buys? The insider signal is priced in — skip.
         if f.price_change_pct is not None and f.price_change_pct > max_run_pct:
             _shadow_skip(session, f, "run_up", account_id=account_id)
@@ -161,6 +178,7 @@ def promote_confluence_findings(
             conviction=conviction,
             entry_conditions={"entry_composite": f.score, "entry_price": close},
             invalidation_conditions=dict(_DEFAULT_INVALIDATION),
+            exit_conditions=dict(_DEFAULT_EXIT),
             evidence_refs={"confluence_finding_id": f.id, "kind": f.kind},
             status=ThesisStatus.ACTIVE.value,
             conviction_history=[{"conviction": conviction, "trigger": f"confluence:{f.kind}"}],

@@ -14,6 +14,7 @@ decided by the guardrail gate (allowlist + ``no_active_thesis`` + caps + dry-run
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from loguru import logger
@@ -21,6 +22,7 @@ from loguru import logger
 from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
+    get_last_exited_thesis,
     get_latest_price,
     get_latest_report,
     get_thesis,
@@ -99,6 +101,17 @@ def promote_candidates(
             continue  # already maintained (active/watch/draft) — don't duplicate.
         # An INVALIDATED prior thesis does NOT block re-promotion: if the name has
         # re-cleared the score floor, a fresh thesis supersedes it.
+        # A take-profit/horizon EXIT does, for a cooldown: a still-high-scoring name
+        # would otherwise re-promote on the very next run and undo the exit (churning
+        # the sell into a re-buy, or pre-empting a sentinel-tripped sell entirely).
+        if ac.reentry_cooldown_days > 0:
+            prior_exit = get_last_exited_thesis(session, candidate.ticker, account_id)
+            le = prior_exit.last_evaluated_at if prior_exit is not None else None
+            if le is not None:
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                le = le.replace(tzinfo=None) if le.tzinfo else le
+                if (now - le).total_seconds() < ac.reentry_cooldown_days * 86400:
+                    continue
 
         thesis = None
         if evaluator is not None:

@@ -85,6 +85,47 @@ def invalidate_thesis(session: Session, thesis: Thesis, reason: str) -> None:
     session.flush()
 
 
+def exit_thesis(session: Session, thesis: Thesis, reason: str) -> None:
+    """Conclude a thesis that PLAYED OUT (take-profit/horizon): status EXITED, conviction 0.
+
+    Same sell mechanics as invalidation — the symbol drops out of the live thesis set,
+    so the next rebalance trims the held position to a 0 target via the full-exit path.
+    EXITED (unlike INVALIDATED) also vanishes from ``get_thesis``, so a fresh signal can
+    re-promote the name immediately; callers guard against same-signal re-entry.
+    """
+    history = list(thesis.conviction_history or [])
+    history.append({"ts": _utcnow().isoformat(), "conviction": 0.0, "trigger": f"exited: {reason}"})
+    thesis.conviction_history = history
+    thesis.conviction = 0.0
+    thesis.target_weight = 0.0
+    thesis.status = ThesisStatus.EXITED.value
+    thesis.last_evaluated_at = _utcnow()
+    session.flush()
+
+
+def update_high_water(session: Session, thesis: Thesis, price: float | None) -> None:
+    """Monotonically raise the thesis's high-water mark (no-op on None/lower prices)."""
+    if price is None or price <= 0:
+        return
+    current = thesis.high_water_mark
+    if current is None or price > current:
+        thesis.high_water_mark = float(price)
+        session.flush()
+
+
+def get_last_exited_thesis(
+    session: Session, symbol: str, account_id: str | None = None
+) -> Thesis | None:
+    """The most-recently-updated EXITED thesis for a symbol (re-entry-guard lookup)."""
+    stmt = select(Thesis).where(
+        Thesis.symbol == symbol, Thesis.status == ThesisStatus.EXITED.value
+    )
+    if account_id:
+        stmt = stmt.where(Thesis.account_id == account_id)
+    stmt = stmt.order_by(Thesis.updated_at.desc()).limit(1)
+    return session.scalar(stmt)
+
+
 def get_active_symbols(session: Session, account_id: str | None = None) -> set[str]:
     """Set of symbols with a live (ACTIVE/WATCH) thesis — the dynamic allowlist."""
     return {t.symbol for t in get_active_theses(session, account_id)}

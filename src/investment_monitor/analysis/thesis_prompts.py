@@ -8,9 +8,12 @@ _THESIS_JSON_SPEC = """Respond with ONLY a single JSON object (no prose, no mark
   "risks": ["<short>", ...],
   "invalidation_conditions": {{"composite_drop": <points, optional>,
                               "price_drop_pct": <percent, optional>,
-                              "keywords": ["fraud", "bankruptcy", ...]}}}}
+                              "keywords": ["fraud", "bankruptcy", ...]}},
+  "exit_conditions": {{"profit_target_pct": <percent gain to take profit, optional>,
+                      "max_hold_days": <days, optional>}}}}
 conviction is your honest probability-weighted confidence the thesis plays out (0=no edge, 1=certain).
-invalidation_conditions are the hard triggers that would END the thesis."""
+invalidation_conditions are the hard triggers that would END the thesis.
+exit_conditions say when the thesis has PLAYED OUT (omit either key to keep the system defaults)."""
 
 THESIS_GENERATE_PROMPT = f"""You are a disciplined long-only equity analyst forming a fresh investment thesis \
 for {{symbol}}. Be skeptical and concrete. You only produce a thesis; deterministic code sizes \

@@ -107,6 +107,22 @@ autonomy:
   score_floor: 75.0               # composite score (0-100) required to promote a name
   max_promotions_per_run: 3       # cap new names added per run (bias toward maintaining)
   require_buy_recommendation: false  # also require a buy/strong_buy research report
+  reentry_cooldown_days: 30.0     # after a take-profit/horizon EXIT, don't re-promote
+                                  # the same name for this many days (0 = off)
+
+# Deterministic take-profit exits — the upside twin of invalidation. These are the
+# DEFAULT thresholds for every live thesis; a thesis's own exit_conditions (stamped
+# at promotion, or LLM-proposed and clamped) merge over them. 0 disables a trigger.
+# Checked twice daily at re-eval and hourly by the sentinel; a trip sets the thesis
+# EXITED -> the next gated trade run sells the position.
+exits:
+  enabled: true
+  profit_target_pct: 40.0         # sell once up this % from entry (mirrors the
+                                  # promotion run-up guard's "priced in" threshold)
+  trailing_stop_pct: 15.0         # sell this % below the post-entry high, once armed
+  trailing_arm_pct: 10.0          # the trailing stop arms only after this % gain
+  max_hold_days: 0.0              # time-box every thesis (0 = off globally; confluence
+                                  # promotions stamp their own backtest-validated 90d)
 
 # Simulate the full pipeline and place NO real orders when true. Keep true until
 # you have reviewed several dry runs. The ROBO_FORCE_DRY_RUN env kill-switch must

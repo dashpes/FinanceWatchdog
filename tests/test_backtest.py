@@ -103,6 +103,50 @@ def test_illiquid_and_small_clusters_skipped(tmp_path):
     assert result.trades == []
 
 
+def test_profit_target_exit_captures_gain(tmp_path):
+    init_db(tmp_path / "t.db")
+    cluster_day = START + timedelta(days=14)
+    with get_session() as s:
+        # Flat through entry, then a steady climb well past +25%.
+        _seed_prices(s, "WIN", start=START - timedelta(days=30), days=200,
+                     price_fn=lambda i: 10.0 if i < 50 else 10.0 + (i - 50) * 0.15)
+        _seed_insiders(s, "WIN", cluster_day)
+    with get_session() as s:
+        result = run_confluence_backtest(
+            s, start=START, end=END, step_days=5, horizon_days=365,
+            profit_target_pct=25.0,
+        )
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    assert t.exit_reason == "profit_target" and t.ret >= 0.25
+
+
+def test_trailing_stop_protects_gain(tmp_path):
+    init_db(tmp_path / "t.db")
+    cluster_day = START + timedelta(days=14)
+
+    def px(i: int) -> float:
+        if i < 50:
+            return 10.0                              # flat through entry
+        if i < 70:
+            return 10.0 + (i - 50) * 0.15            # ride to 13.0 (+30%, arms the stop)
+        return max(8.0, 13.0 - (i - 70) * 0.1)       # then give it back
+
+    with get_session() as s:
+        _seed_prices(s, "RIDE", start=START - timedelta(days=30), days=200, price_fn=px)
+        _seed_insiders(s, "RIDE", cluster_day)
+    with get_session() as s:
+        result = run_confluence_backtest(
+            s, start=START, end=END, step_days=5, horizon_days=365,
+            trailing_stop_pct=15.0, trailing_arm_pct=10.0,
+        )
+    assert len(result.trades) == 1
+    t = result.trades[0]
+    # Exits ~15% below the 13.0 peak — still a protected GAIN, long before the
+    # entry-based -25% drawdown would ever have fired.
+    assert t.exit_reason == "trailing_stop" and t.ret > 0
+
+
 def test_summary_bands(tmp_path):
     init_db(tmp_path / "t.db")
     cluster_day = START + timedelta(days=14)
