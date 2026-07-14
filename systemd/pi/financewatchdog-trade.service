@@ -13,4 +13,8 @@ EnvironmentFile=-@FW_HOME@/.env
 # Whether an order is real depends on robo.yaml dry_run + ROBO_FORCE_DRY_RUN; the
 # schedule is independent of going live. Shares robo-cron.sh's single-run lock with
 # the research loop so a trade never overlaps a research cycle.
-ExecStart=@FW_HOME@/scripts/robo-cron.sh thesis-run
+# --skip-maintenance: the overnight research loop already does the (hours-long on a
+# Pi) LLM re-eval of every thesis, and the hourly sentinel covers deterministic
+# invalidation/take-profit intraday. With maintenance inline, a 14B model pushed the
+# 12:30 slot past the close every day and its orders were all deferred_market_closed.
+ExecStart=@FW_HOME@/scripts/robo-cron.sh thesis-run --skip-maintenance
