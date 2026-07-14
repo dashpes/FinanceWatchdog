@@ -175,6 +175,19 @@ def test_select_top_positions_weakest_incumbent_evicted_first():
     assert set(out) == {"C1", "I2"}
 
 
+def test_select_top_positions_incumbent_wins_exact_ties():
+    # Once the position cap flattens many strong names to the SAME weight, ties are
+    # the common case — and an exact tie must never rotate a real position (the
+    # challenger has not beaten the incumbent by any margin, let alone the required
+    # one). Alphabetical order must not pick the book.
+    raw = {"AAAA": 0.25, "BBBB": 0.25, "HELD": 0.25}
+    out = select_top_positions(raw, 2, held={"HELD"}, hysteresis=0.25)
+    assert "HELD" in out and len(out) == 2
+    # Even with hysteresis off, a tie keeps the incumbent (rotating costs spread).
+    out0 = select_top_positions(raw, 2, held={"HELD"}, hysteresis=0.0)
+    assert "HELD" in out0
+
+
 def test_select_top_positions_exited_incumbent_holds_no_slot():
     # A broken/exited thesis has weight 0 -> it is not in raw at all, so hysteresis
     # can never delay an exit.

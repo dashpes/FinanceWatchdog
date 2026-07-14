@@ -190,12 +190,13 @@ def select_top_positions(
     saturated conviction band the raw ranking moves on LLM noise; without a margin,
     rank-8-vs-9 flips a real position every day (sell EML after 1 day, rebuy later).
     Exits are never delayed: a broken/exited/sub-floor name has no weight, so it is
-    not in ``raw`` and holds no slot. Ties break by symbol so dict order never
-    decides capital.
+    not in ``raw`` and holds no slot. Ties break held-first then by symbol — once
+    the position cap flattens many strong names to the same weight, an EXACT tie
+    must never rotate a real position, and dict order never decides capital.
     """
     if not max_positions or max_positions <= 0 or len(raw) <= max_positions:
         return dict(raw)
-    ranked = sorted(raw.items(), key=lambda kv: (-kv[1], kv[0]))
+    ranked = sorted(raw.items(), key=lambda kv: (-kv[1], kv[0] not in held, kv[0]))
     if hysteresis <= 0 or not held:
         return dict(ranked[:max_positions])
 
