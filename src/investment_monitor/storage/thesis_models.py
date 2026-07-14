@@ -51,6 +51,14 @@ class Thesis(Base):
     # invalidation_conditions are evaluated deterministically by check_invalidation.
     entry_conditions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     invalidation_conditions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    # Take-profit overrides evaluated deterministically by check_exit (profit_target_pct,
+    # trailing_stop_pct, trailing_arm_pct, max_hold_days). Merged OVER the config-level
+    # ExitConfig defaults; NULL/empty = defaults apply unchanged. Nullable (not default={})
+    # so the additive schema reconcile can ADD COLUMN it onto the live table.
+    exit_conditions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Highest observed close since entry (maintained monotonically by the evaluator and
+    # the sentinel; drives the trailing stop). Nullable for the same reconcile reason.
+    high_water_mark: Mapped[float | None] = mapped_column(Float, nullable=True)
     # References into other tables for audit: {report_id, score_id, sim_id, alert_ids:[...]}.
     evidence_refs: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 

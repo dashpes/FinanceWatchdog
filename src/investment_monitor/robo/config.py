@@ -239,6 +239,74 @@ class SizingConfig(BaseModel):
     )
 
 
+class ExitConfig(BaseModel):
+    """Deterministic take-profit policy (the upside twin of invalidation).
+
+    These are the DEFAULT ``check_exit`` thresholds for every live thesis; a thesis's
+    own ``exit_conditions`` (stamped at promotion or proposed by the LLM, clamped)
+    are merged OVER them. A value of 0 disables that trigger. Checked in the same
+    passes as invalidation (twice-daily re-eval + hourly sentinel); a trip sets the
+    thesis EXITED -> conviction 0 -> the next gated trade run sells the position.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        title="Take-profit exits",
+        description="Deterministically realize gains (profit target / trailing stop / horizon).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "toggle"}},
+    )
+    # Exit once the gain from entry reaches this percent. Default mirrors the promotion
+    # run-up guard's max_run_pct=40: if +40% means "priced in, don't enter", the same
+    # move on a HELD name means "realized, take it". 0 = off.
+    profit_target_pct: float = Field(
+        default=40.0, ge=0,
+        title="Profit target %",
+        description="Sell once a position is up this % from entry (0 = off).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 200, "step": 5, "unit": "%"}},
+    )
+    # Exit this percent below the post-entry high — protects an open gain from round-
+    # tripping (the entry-based price_drop_pct invalidation only catches it far lower).
+    trailing_stop_pct: float = Field(
+        default=15.0, ge=0,
+        title="Trailing stop %",
+        description="Sell this % below the post-entry high once armed (0 = off).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 50, "step": 1, "unit": "%"}},
+    )
+    # The trailing stop arms only once the high-water gain reaches this percent, so a
+    # fresh flat position can't be noise-stopped (downside stays with invalidation).
+    trailing_arm_pct: float = Field(
+        default=10.0, ge=0,
+        title="Trailing stop arms at %",
+        description="Gain required before the trailing stop activates.",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 100, "step": 5, "unit": "%"}},
+    )
+    # Time-boxed horizon exit, in days. 0 = off GLOBALLY by default: a horizon suits
+    # event-driven confluence bets (whose promotion stamps 90d per thesis, the backtest-
+    # validated default) but would churn a still-high-scoring discovery name straight
+    # into re-promotion.
+    max_hold_days: float = Field(
+        default=0.0, ge=0,
+        title="Max hold (days)",
+        description="Sell after this many days regardless (0 = off; confluence theses carry their own 90d).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 365, "step": 5, "unit": "days"}},
+    )
+
+    def as_conditions(self) -> dict:
+        """The config defaults as a ``check_exit`` conditions dict (empty when disabled)."""
+        if not self.enabled:
+            return {}
+        return {
+            "profit_target_pct": self.profit_target_pct,
+            "trailing_stop_pct": self.trailing_stop_pct,
+            "trailing_arm_pct": self.trailing_arm_pct,
+            "max_hold_days": self.max_hold_days,
+        }
+
+
 class AutonomyConfig(BaseModel):
     """Autonomous stock selection (Phase 4): promote discovery-funnel names to theses.
 
@@ -257,6 +325,12 @@ class AutonomyConfig(BaseModel):
     max_promotions_per_run: int = Field(default=3, ge=0)
     # Also require a fresh research report recommending buy/strong_buy (extra key).
     require_buy_recommendation: bool = False
+    # After a take-profit/horizon EXIT, don't re-promote the same name for this many
+    # days. Without it, a still-high-scoring candidate re-promotes on the very next
+    # run — either churning the sell straight back into a buy, or (when the exit
+    # tripped intraday via the sentinel) re-inflating the target weight BEFORE the
+    # sell so the take-profit silently never executes. 0 = off.
+    reentry_cooldown_days: float = Field(default=30.0, ge=0)
 
 
 class LearningConfig(BaseModel):
@@ -356,6 +430,9 @@ class RoboConfig(BaseModel):
 
     # Risk-adjusted conviction sizing (Phase 3, used in autonomous mode).
     sizing: SizingConfig = Field(default_factory=SizingConfig)
+
+    # Deterministic take-profit exits (profit target / trailing stop / horizon).
+    exits: ExitConfig = Field(default_factory=ExitConfig)
 
     # Autonomous stock selection from the discovery funnel (Phase 4). Disabled by default.
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)

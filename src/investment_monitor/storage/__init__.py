@@ -82,14 +82,17 @@ from .memory_operations import (
 )
 from .thesis_models import LIVE_THESIS_STATUSES, Thesis, ThesisStatus
 from .thesis_operations import (
+    exit_thesis,
     get_active_symbols,
     get_active_theses,
     get_all_theses,
+    get_last_exited_thesis,
     get_thesis,
     invalidate_thesis,
     record_conviction_update,
     save_thesis,
     set_target_weight,
+    update_high_water,
 )
 from .learning_models import (
     LEARNING_KIND_ACCURACY_MODIFIER,
@@ -230,6 +233,9 @@ __all__ = [
     "record_conviction_update",
     "set_target_weight",
     "invalidate_thesis",
+    "exit_thesis",
+    "update_high_water",
+    "get_last_exited_thesis",
     "get_active_symbols",
     # Learning / feedback ledger (Phase 6)
     "LearningEvent",

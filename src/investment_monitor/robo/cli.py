@@ -405,13 +405,14 @@ def thesis_run(
 
     # 2. Maintain existing theses (deterministic invalidation, then LLM re-eval).
     if not skip_maintenance:
-        actions = {"invalidated": 0, "updated": 0, "unchanged": 0}
+        actions = {"invalidated": 0, "exited": 0, "updated": 0, "unchanged": 0}
         with get_session() as session:
             for thesis in get_active_theses(session, acct):
                 actions[evaluator.evaluate(session, thesis, account_id=acct)] += 1
         typer.echo(
             f"Thesis maintenance: {actions['updated']} updated, "
-            f"{actions['invalidated']} invalidated, {actions['unchanged']} unchanged"
+            f"{actions['invalidated']} invalidated, {actions['exited']} exited (profit/horizon), "
+            f"{actions['unchanged']} unchanged"
         )
 
     # 3. Recompute sized target weights from current convictions.
@@ -695,6 +696,15 @@ def backtest(
     step: int = typer.Option(5, "--step", help="Days between signal re-evaluations"),
     horizon: int = typer.Option(90, "--horizon", help="Max holding period (days)"),
     min_score: float = typer.Option(4.0, "--min-score", help="Promotion score floor to test"),
+    profit_target: float = typer.Option(
+        None, "--profit-target", help="Take-profit at this % gain from entry (off if omitted)"
+    ),
+    trailing_stop: float = typer.Option(
+        None, "--trailing-stop", help="Exit this % below the post-entry high (off if omitted)"
+    ),
+    trailing_arm: float = typer.Option(
+        10.0, "--trailing-arm", help="Gain % from entry required before the trailing stop arms"
+    ),
 ) -> None:
     """Walk-forward replay of confluence -> promotion -> exits over stored history.
 
@@ -715,6 +725,8 @@ def backtest(
         result = run_confluence_backtest(
             session, start=start, end=end, step_days=step,
             horizon_days=horizon, promote_min_score=min_score,
+            profit_target_pct=profit_target, trailing_stop_pct=trailing_stop,
+            trailing_arm_pct=trailing_arm,
         )
     s = result.summary()
 
@@ -760,9 +772,10 @@ def sentinel(
         return
     typer.echo(
         f"Sentinel: {result['checked']} position(s) checked, "
-        f"{len(result['tripped'])} invalidated, {len(result['flagged'])} flagged"
+        f"{len(result['tripped'])} invalidated, {len(result['exited'])} exited, "
+        f"{len(result['flagged'])} flagged"
     )
-    for line in result["tripped"] + result["flagged"]:
+    for line in result["tripped"] + result["exited"] + result["flagged"]:
         typer.echo(f"  - {line}")
 
 

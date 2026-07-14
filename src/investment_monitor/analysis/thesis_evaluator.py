@@ -29,11 +29,12 @@ from investment_monitor.analysis.thesis_prompts import (
     THESIS_UPDATE_PROMPT,
     THESIS_UPDATE_PROMPT_WITH_OUTCOME,
 )
-from investment_monitor.robo.invalidation import check_invalidation
+from investment_monitor.robo.invalidation import check_exit, check_invalidation, entry_basis
 from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
     accuracy_stats_for_symbol,
+    exit_thesis,
     get_latest_price,
     get_latest_report,
     get_latest_score,
@@ -45,6 +46,7 @@ from investment_monitor.storage import (
     record_thesis_outcome,
     save_thesis,
     set_target_weight,
+    update_high_water,
 )
 
 if TYPE_CHECKING:
@@ -71,6 +73,7 @@ class ThesisUpdate:
     narrative: str
     conviction: float
     invalidation_conditions: dict
+    exit_conditions: dict
     raw: dict
 
 
@@ -132,6 +135,31 @@ def _sanitize_invalidation(conditions: dict) -> dict:
     return out
 
 
+# LLM-proposed exit thresholds are clamped into these bands, so a hallucinated
+# "profit_target_pct: 2" can't scalp-exit a live position and "5000" can't
+# effectively disable the target. Keys absent/garbage -> fall back to config defaults.
+_EXIT_CLAMPS = {
+    "profit_target_pct": (10.0, 200.0),
+    "trailing_stop_pct": (5.0, 50.0),
+    "trailing_arm_pct": (0.0, 100.0),
+    "max_hold_days": (10.0, 365.0),
+}
+
+
+def _sanitize_exit(conditions: dict) -> dict:
+    """Coerce LLM-supplied take-profit thresholds to sane, clamped magnitudes."""
+    out: dict = {}
+    for key, (lo, hi) in _EXIT_CLAMPS.items():
+        if key in conditions:
+            try:
+                value = abs(float(conditions[key]))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                out[key] = max(lo, min(hi, value))
+    return out
+
+
 def parse_thesis_response(text: str) -> ThesisUpdate | None:
     """Parse an LLM thesis response into a ThesisUpdate, or None if unusable (pure)."""
     obj = _extract_json_object(text)
@@ -145,8 +173,10 @@ def parse_thesis_response(text: str) -> ThesisUpdate | None:
         return None
     inv = obj.get("invalidation_conditions")
     inv = _sanitize_invalidation(inv if isinstance(inv, dict) else {})
+    ext = obj.get("exit_conditions")
+    ext = _sanitize_exit(ext if isinstance(ext, dict) else {})
     return ThesisUpdate(narrative=narrative, conviction=conviction,
-                        invalidation_conditions=inv, raw=obj)
+                        invalidation_conditions=inv, exit_conditions=ext, raw=obj)
 
 
 # --------------------------------------------------------------------------- #
@@ -231,13 +261,10 @@ def _outcome_block(session: "Session", thesis: Thesis, latest_price: float | Non
     prompt. Fully fail-open: any error yields "" rather than crashing evaluate().
     """
     try:
-        entry = thesis.entry_conditions or {}
         # Prefer the real fill cost over the idea-time quote (see evaluate()), so the
         # line shown to the LLM matches the outcome the feedback loop records.
-        entry_basis = entry.get("fill_cost")
-        if entry_basis is None:
-            entry_basis = entry.get("entry_price")
-        ret = _realized_return(entry_basis, latest_price)
+        basis = entry_basis(thesis.entry_conditions)
+        ret = _realized_return(basis, latest_price)
         if ret is None:
             return ""
         days = _days_held(thesis)
@@ -246,7 +273,7 @@ def _outcome_block(session: "Session", thesis: Thesis, latest_price: float | Non
             return ""
         cap = float(lcfg.max_abs_return_pct) / 100.0
         ret_disp = max(-cap, min(cap, ret))
-        entry_price = float(entry_basis)
+        entry_price = float(basis)
         line = (
             f"opened ${entry_price:.2f} ~{days}d ago; now ${float(latest_price):.2f} "
             f"({ret_disp * 100:+.1f}%)"
@@ -300,8 +327,9 @@ class ThesisEvaluator:
     def evaluate(self, session: "Session", thesis: Thesis, *, account_id: str | None = None) -> str:
         """Re-evaluate one existing thesis. Returns the action taken.
 
-        Order: deterministic invalidation first, then (if still valid) an LLM
-        conviction/narrative update. On any LLM failure the thesis is unchanged.
+        Order: deterministic invalidation first, then the deterministic take-profit
+        exit check, then (if still live) an LLM conviction/narrative update. On any
+        LLM failure the thesis is unchanged.
         """
         composite_str, latest_composite = _score_block(session, thesis.symbol)
         news_str, severe = _news_block(session, thesis.symbol)
@@ -319,10 +347,7 @@ class ThesisEvaluator:
                 # a live position exists) over the quote captured at idea time, so the
                 # learned outcome reflects the actual trade. Falls back to entry_price
                 # in paper / before any fill — keeping that path byte-identical.
-                entry_basis = entry.get("fill_cost")
-                if entry_basis is None:
-                    entry_basis = entry.get("entry_price")
-                realized = _realized_return(entry_basis, latest_price)
+                realized = _realized_return(entry_basis(entry), latest_price)
                 today = _utcnow_naive().date()
                 # Record one outcome per symbol per day, only once the thesis has aged
                 # past min_days_held and actually moved — so intraday re-evals don't
@@ -360,6 +385,25 @@ class ThesisEvaluator:
             logger.info("thesis {s} INVALIDATED: {r}", s=thesis.symbol, r=reason)
             return "invalidated"
 
+        # Take-profit twin: maintain the high-water mark, then check the deterministic
+        # exit conditions (config defaults overlaid by any per-thesis overrides). Runs
+        # AFTER invalidation so a broken thesis is always recorded as broken, and
+        # BEFORE the LLM so a played-out thesis can't be argued into overstaying.
+        update_high_water(session, thesis, latest_price)
+        ecfg = getattr(self._config, "exits", None)
+        if ecfg is not None and ecfg.enabled:
+            exit_reason = check_exit(
+                {**ecfg.as_conditions(), **(thesis.exit_conditions or {})},
+                entry_price=entry_basis(entry),
+                latest_price=latest_price,
+                high_water_mark=thesis.high_water_mark,
+                days_held=_days_held(thesis),
+            )
+            if exit_reason is not None:
+                exit_thesis(session, thesis, exit_reason)
+                logger.info("thesis {s} EXITED: {r}", s=thesis.symbol, r=exit_reason)
+                return "exited"
+
         # Outcome-aware re-eval: inject the compact track-record block only when the
         # loop is enabled AND there is a real block to show; otherwise the base prompt
         # is used byte-for-byte unchanged (no KeyError, no empty section).
@@ -395,6 +439,8 @@ class ThesisEvaluator:
         thesis.narrative = update.narrative
         if update.invalidation_conditions:
             thesis.invalidation_conditions = update.invalidation_conditions
+        if update.exit_conditions:
+            thesis.exit_conditions = update.exit_conditions
         record_conviction_update(session, thesis, update.conviction, trigger="llm_reeval")
         return "updated"
 
@@ -428,6 +474,7 @@ class ThesisEvaluator:
                 "entry_price": latest_price,
             },
             invalidation_conditions=update.invalidation_conditions,
+            exit_conditions=update.exit_conditions or None,
             evidence_refs={"report_id": getattr(report, "id", None)},
             status=ThesisStatus.DRAFT.value,
             conviction_history=[{"conviction": update.conviction, "trigger": "generated"}],

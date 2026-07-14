@@ -118,6 +118,42 @@ def test_stale_finding_not_promoted(tmp_path):
     assert promoted == []
 
 
+def test_promoted_thesis_carries_horizon_exit(tmp_path):
+    # A confluence bet is time-boxed: the promotion stamps the backtest-validated
+    # 90d horizon; profit target / trailing stop come from the config defaults.
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "AAA", 8.0)
+        _seed_price(s, "AAA")
+    with get_session() as s:
+        assert promote_confluence_findings(s, min_score=4.0) == ["AAA"]
+        assert get_active_theses(s)[0].exit_conditions == {"max_hold_days": 90}
+
+
+def test_exited_name_not_repromoted_from_same_finding(tmp_path):
+    # After a take-profit/horizon exit, the SAME finding must not churn the sell
+    # straight back into a buy; only a genuinely NEW finding may re-enter.
+    from datetime import datetime
+
+    from investment_monitor.storage import (
+        Thesis, ThesisStatus, get_recent_findings, save_thesis,
+    )
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        _seed_finding(s, "TOOK", 8.0)
+        _seed_price(s, "TOOK")
+    with get_session() as s:
+        f = get_recent_findings(s, min_score=4.0, max_age_days=3)[0]
+        save_thesis(s, Thesis(
+            symbol="TOOK", narrative="x", conviction=0.0,
+            status=ThesisStatus.EXITED.value,
+            evidence_refs={"confluence_finding_id": f.id},
+            last_evaluated_at=datetime.combine(TODAY, datetime.min.time()),
+        ))
+    with get_session() as s:
+        assert promote_confluence_findings(s, min_score=4.0) == []
+
+
 def test_falling_knife_not_repromoted_from_same_finding(tmp_path):
     # A self-invalidated name must NOT be re-bought from the SAME stale finding.
     from datetime import datetime

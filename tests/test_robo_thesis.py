@@ -19,8 +19,8 @@ from investment_monitor.analysis.thesis_evaluator import (
     ThesisEvaluator,
     parse_thesis_response,
 )
-from investment_monitor.robo.config import RoboCaps, RoboConfig, SizingConfig
-from investment_monitor.robo.invalidation import check_invalidation
+from investment_monitor.robo.config import ExitConfig, RoboCaps, RoboConfig, SizingConfig
+from investment_monitor.robo.invalidation import check_exit, check_invalidation, entry_basis
 from investment_monitor.robo.models import AccountState, Position
 from investment_monitor.robo.rebalance import rebalance_run
 from investment_monitor.robo.sizing import (
@@ -123,6 +123,51 @@ def test_invalidation_composite_drop_boundary():
     cond = {"composite_drop": 10}
     assert check_invalidation(cond, entry_composite=100, latest_composite=90) is not None
     assert check_invalidation(cond, entry_composite=100, latest_composite=91) is None
+
+
+# --------------------------------------------------------------------------- #
+# B2. Pure take-profit exits (check_exit — invalidation's upside twin)
+# --------------------------------------------------------------------------- #
+def test_exit_profit_target_boundary_and_fail_open():
+    cond = {"profit_target_pct": 40}
+    assert check_exit(cond, entry_price=10.0, latest_price=14.0) is not None  # exactly +40%
+    assert check_exit(cond, entry_price=10.0, latest_price=13.9) is None
+    # Missing data fails OPEN (no trip) — never force an exit off absent inputs.
+    assert check_exit(cond, entry_price=None, latest_price=14.0) is None
+    assert check_exit(cond, entry_price=10.0, latest_price=None) is None
+
+
+def test_exit_trailing_stop_arms_then_fires():
+    cond = {"trailing_stop_pct": 15, "trailing_arm_pct": 10}
+    # NOT armed: the peak never cleared +10% — a fall from a flat peak is
+    # invalidation's (price_drop_pct) problem, not the trailing stop's.
+    assert check_exit(cond, entry_price=10.0, latest_price=8.4, high_water_mark=10.5) is None
+    # Armed (+35% peak) and 18.5% off the high -> exit with the gain protected.
+    assert check_exit(cond, entry_price=10.0, latest_price=11.0, high_water_mark=13.5) is not None
+    # Armed but only ~10% off the high -> keep riding.
+    assert check_exit(cond, entry_price=10.0, latest_price=12.15, high_water_mark=13.5) is None
+
+
+def test_exit_horizon_boundary():
+    cond = {"max_hold_days": 90}
+    assert check_exit(cond, days_held=90) is not None
+    assert check_exit(cond, days_held=89) is None
+    assert check_exit(cond, days_held=None) is None
+
+
+def test_exit_zero_disables_and_empty_never_fires():
+    # A 0/absent threshold disables that trigger (per-thesis override semantics).
+    assert check_exit({"profit_target_pct": 0}, entry_price=10.0, latest_price=100.0) is None
+    assert check_exit({}, entry_price=10.0, latest_price=100.0,
+                      high_water_mark=100.0, days_held=999) is None
+    assert check_exit(None, entry_price=10.0, latest_price=100.0) is None
+
+
+def test_entry_basis_prefers_fill_cost():
+    assert entry_basis({"fill_cost": 9.5, "entry_price": 10.0}) == 9.5
+    assert entry_basis({"entry_price": 10.0}) == 10.0
+    assert entry_basis({"fill_cost": "bad", "entry_price": 10.0}) == 10.0  # garbage skipped
+    assert entry_basis({}) is None and entry_basis(None) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -397,3 +442,117 @@ def test_evaluator_invalidation_short_circuits_llm(tmp_path):
         action = evaluator.evaluate(s, t)
         assert action == "invalidated"
         assert t.conviction == 0.0 and t.status == ThesisStatus.INVALIDATED.value
+
+
+# --------------------------------------------------------------------------- #
+# G. Take-profit exits through the evaluator
+# --------------------------------------------------------------------------- #
+def test_parse_thesis_sanitizes_exit_conditions():
+    # LLM-proposed exit thresholds are clamped into sane bands: a hallucinated 2%
+    # target can't scalp-exit a position, 5000 days can't disable the horizon.
+    u = parse_thesis_response(
+        '{"narrative":"x","conviction":0.7,"exit_conditions":'
+        '{"profit_target_pct":2,"max_hold_days":5000,"trailing_stop_pct":-20}}'
+    )
+    assert u.exit_conditions["profit_target_pct"] == 10.0   # clamped up to the floor
+    assert u.exit_conditions["max_hold_days"] == 365.0      # clamped down to the cap
+    assert u.exit_conditions["trailing_stop_pct"] == 20.0   # negative -> magnitude
+    # Absent block -> empty dict (config defaults apply unchanged).
+    assert parse_thesis_response('{"narrative":"x","conviction":0.7}').exit_conditions == {}
+
+
+def test_evaluator_take_profit_short_circuits_llm(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="MOON", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 10.0},
+            invalidation_conditions={"price_drop_pct": 25},
+        ))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="MOON", date=date.today(), close=15.0))  # +50% >= default 40%
+    # LLM wants to let it ride — the deterministic profit target must win.
+    llm = _FakeLLM('{"narrative": "to the moon!", "conviction": 0.99}')
+    evaluator = ThesisEvaluator(llm, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "MOON")
+        action = evaluator.evaluate(s, t)
+        assert action == "exited"
+        assert t.status == ThesisStatus.EXITED.value and t.conviction == 0.0
+        assert "profit target" in t.conviction_history[-1]["trigger"]
+    with get_session() as s:
+        assert get_active_theses(s) == []          # no longer drives allocation
+        assert get_thesis(s, "MOON") is None       # EXITED vanishes from get_thesis
+
+
+def test_evaluator_trailing_stop_uses_high_water(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="RIDE", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 10.0},
+            high_water_mark=13.5,   # peaked +35% on an earlier pass
+        ))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="RIDE", date=date.today(), close=11.0))  # 18.5% off the high
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "RIDE")
+        assert evaluator.evaluate(s, t) == "exited"
+        assert t.status == ThesisStatus.EXITED.value
+        assert "trailing stop" in t.conviction_history[-1]["trigger"]
+
+
+def test_evaluator_maintains_high_water_mark(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="HWMK", conviction=0.5, status=ThesisStatus.ACTIVE.value,
+                              entry_conditions={"entry_price": 10.0}))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="HWMK", date=date.today(), close=11.0))
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "HWMK")
+        # +10%: armed but not fallen -> no exit; the peak must be recorded though.
+        assert evaluator.evaluate(s, t) == "unchanged"
+        assert t.high_water_mark == 11.0
+        assert t.status == ThesisStatus.ACTIVE.value
+
+
+def test_evaluator_horizon_exit_from_thesis_stamp(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="OLDIE", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 10.0},
+            exit_conditions={"max_hold_days": 90},   # confluence-style per-thesis stamp
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=120),
+        ))
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "OLDIE")
+        assert evaluator.evaluate(s, t) == "exited"   # no price data needed for horizon
+        assert "horizon" in t.conviction_history[-1]["trigger"]
+
+
+def test_evaluator_exit_config_master_switch(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="HODL", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 10.0},
+        ))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="HODL", date=date.today(), close=20.0))  # +100%
+    cfg = _autonomous_config().model_copy(update={"exits": ExitConfig(enabled=False)})
+    evaluator = ThesisEvaluator(None, cfg)
+    with get_session() as s:
+        t = get_thesis(s, "HODL")
+        assert evaluator.evaluate(s, t) == "unchanged"  # exits off -> position rides
+        assert t.status == ThesisStatus.ACTIVE.value
