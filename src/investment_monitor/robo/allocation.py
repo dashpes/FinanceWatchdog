@@ -121,8 +121,22 @@ def generate_candidate_orders(
     fee_multiplier = Decimal("1") + Decimal(str(config.caps.fee_buffer))
 
     rows = [r for r in compute_allocation(account_state, config) if r.symbol != CASH_SYMBOL]
-    # Largest absolute drift first so the most-out-of-balance holdings trade first.
-    rows.sort(key=lambda r: abs(r.drift), reverse=True)
+
+    def _held_qty(symbol: str) -> Decimal:
+        pos = account_state.get_position(symbol)
+        return pos.quantity if pos else Decimal("0")
+
+    def _is_full_exit(row: AllocationRow) -> bool:
+        # A dropped/invalidated thesis targets ~0; its held shares must ALWAYS be
+        # liquidated — even a sub-band dust stub (e.g. a $0.20 leftover) that the
+        # rebalance band would otherwise skip and strand forever (FLUT). Keyed on
+        # target_weight (not a dollar floor) so a valid small target on a tiny account
+        # isn't force-sold: a dropped thesis targets exactly 0, a kept one >= ~1.75%.
+        return row.target_weight <= _EXIT_WEIGHT_EPS and _held_qty(row.symbol) > 0
+
+    # Full exits first (they derisk and must always complete regardless of the per-run
+    # cap), then largest absolute drift so the most-out-of-balance holdings trade first.
+    rows.sort(key=lambda r: (_is_full_exit(r), abs(r.drift)), reverse=True)
 
     available_cash = account_state.settled_cash
     orders: list[ProposedOrder] = []
@@ -130,23 +144,20 @@ def generate_candidate_orders(
     for row in rows:
         if len(orders) >= config.caps.max_orders_per_run:
             break
-        if abs(Decimal(str(row.drift))) <= threshold:
+        full_exit = _is_full_exit(row)
+        # Skip trivial drift — but NEVER skip a full exit, even if it is now sub-band dust.
+        if abs(Decimal(str(row.drift))) <= threshold and not full_exit:
             continue
         # Target dollar value vs current dollar value.
         drift_value = Decimal(str(row.drift)) * total  # >0 overweight, <0 underweight
 
         if drift_value > 0:
-            # Full exit ONLY when the TARGET WEIGHT is ~0 (thesis broke / dropped /
-            # invalidated): sell the ENTIRE holding as a share-QUANTITY order. Public
-            # rejects a market-VALUE sell whose notional ~= the whole position ("use a
-            # quantity order instead"), which used to strand a broken name overweight and
-            # retry forever (ADSK/FLUT). Keyed on target_weight (not a dollar dust floor):
-            # on a ~$50 account a valid 1-2% target is only ~$1 and must NOT be force-sold —
-            # it falls through to the notional trim below. The quantity path is uncapped by
-            # max_order_pct — exiting a broken thesis derisks and must always complete.
-            pos = account_state.get_position(row.symbol)
-            held_qty = pos.quantity if pos else Decimal("0")
-            if row.target_weight <= _EXIT_WEIGHT_EPS and held_qty > 0:
+            # Full exit: sell the ENTIRE holding as a share-QUANTITY order. Public rejects
+            # a market-VALUE sell whose notional ~= the whole position ("use a quantity
+            # order instead"). The quantity path is uncapped by max_order_pct AND bypasses
+            # the dust floor — exiting a broken thesis derisks and must always complete.
+            if full_exit:
+                held_qty = _held_qty(row.symbol)
                 orders.append(
                     ProposedOrder(
                         symbol=row.symbol,

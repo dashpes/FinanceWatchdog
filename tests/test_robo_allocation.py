@@ -109,6 +109,37 @@ def test_small_but_valid_target_is_trimmed_not_liquidated():
     assert voo.notional is not None and voo.quantity is None  # a trim, not a full exit
 
 
+def test_sub_band_dust_with_zero_target_is_still_fully_exited():
+    # Regression (FLUT): a held name whose target is ~0 must be liquidated even when the
+    # leftover is a tiny sub-band stub. The rebalance-band gate used to skip it BEFORE the
+    # full-exit path ever ran, stranding e.g. a $0.20 position forever.
+    cfg = make_config().model_copy(update={"target_allocation": {"FLUT": 0.0, "CASH": 1.0}})
+    acct = make_account(settled_cash="100", positions=[
+        Position(symbol="FLUT", quantity=Decimal("0.01"), price=Decimal("20")),  # $0.20 of ~$100 -> 0.2%
+    ])
+    flut = [o for o in generate_candidate_orders(acct, cfg) if o.symbol == "FLUT"]
+    assert flut, "sub-band dust with target 0 must still produce an exit order"
+    assert flut[0].side is OrderSide.SELL
+    assert flut[0].quantity == Decimal("0.01")  # sell ALL shares, as a quantity order
+    assert flut[0].notional is None
+
+
+def test_full_exit_beats_the_per_run_cap():
+    # A broken-thesis dust exit must not be starved by the per-run cap: full exits sort
+    # ahead of ordinary buys/trims so derisking always completes.
+    cfg = make_config().model_copy(update={
+        "target_allocation": {"FLUT": 0.0, "VOO": 0.5, "SCHD": 0.5},
+    })
+    acct = make_account(settled_cash="100", positions=[
+        Position(symbol="FLUT", quantity=Decimal("0.01"), price=Decimal("20")),  # $0.20 dust, target 0
+    ])
+    orders = generate_candidate_orders(acct, cfg.model_copy(update={
+        "caps": RoboCaps(max_order_pct=0.25, max_orders_per_run=1),
+    }))
+    assert len(orders) == 1
+    assert orders[0].symbol == "FLUT" and orders[0].side is OrderSide.SELL
+
+
 def test_partial_trim_still_uses_a_notional_order():
     # A meaningful remaining target -> unchanged notional trim (not a full exit).
     cfg = make_config().model_copy(update={"target_allocation": {"VOO": 0.3, "CASH": 0.7}})
