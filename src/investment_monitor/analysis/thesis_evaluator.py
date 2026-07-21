@@ -16,6 +16,7 @@ Sizing/execution stay deterministic and behind the guardrail gate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -212,6 +213,64 @@ def _latest_close(session: "Session", symbol: str) -> float | None:
     return float(price.close) if price and price.close is not None else None
 
 
+def _evidence_hash(score_block: str, news_block: str) -> str:
+    """Fingerprint of the qualitative evidence the re-eval prompt shows the LLM.
+
+    Deliberately EXCLUDES price/outcome data: price action is handled by the
+    deterministic invalidation/take-profit layers, and hashing it would re-trigger
+    the LLM on every tick — the whole point is that conviction only moves when
+    there is something new to reason about.
+    """
+    return hashlib.sha256(f"{score_block}\n{news_block}".encode("utf-8")).hexdigest()[:16]
+
+
+def _last_evidence_hash(thesis: Thesis) -> str | None:
+    """The evidence fingerprint of the most recent hash-bearing history point."""
+    for point in reversed(thesis.conviction_history or []):
+        if isinstance(point, dict) and point.get("evidence_hash"):
+            return str(point["evidence_hash"])
+    return None
+
+
+def _parse_history_ts(value: Any) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+    if when is not None and when.tzinfo:
+        when = when.astimezone(timezone.utc).replace(tzinfo=None)
+    return when
+
+
+def _conviction_baseline(thesis: Thesis, now: datetime) -> float | None:
+    """Conviction as it stood ~24h ago, for the per-day rate limit.
+
+    The last recorded point at or before ``now - 24h``; a younger thesis falls back
+    to its oldest recorded point, then to the current conviction (bounding even the
+    first re-eval of a fresh promotion). None only when nothing is recorded at all.
+    """
+    cutoff = now - timedelta(days=1)
+    baseline: float | None = None
+    oldest: float | None = None
+    for point in thesis.conviction_history or []:
+        if not isinstance(point, dict):
+            continue
+        try:
+            conv = float(point.get("conviction"))
+        except (TypeError, ValueError):
+            continue
+        if oldest is None:
+            oldest = conv
+        when = _parse_history_ts(point.get("ts"))
+        if when is not None and when <= cutoff:
+            baseline = conv  # history is append-only chronological: keep the latest pre-cutoff point
+    if baseline is not None:
+        return baseline
+    if oldest is not None:
+        return oldest
+    return float(thesis.conviction) if thesis.conviction is not None else None
+
+
 # --------------------------------------------------------------------------- #
 # Feedback loop (Phase 6): realized-outcome capture + compact prompt context
 # --------------------------------------------------------------------------- #
@@ -405,6 +464,22 @@ class ThesisEvaluator:
                 logger.info("thesis {s} EXITED: {r}", s=thesis.symbol, r=exit_reason)
                 return "exited"
 
+        # Evidence gate: if the qualitative evidence the prompt would show is identical
+        # to what the LLM already saw at its last re-eval, there is nothing to update ON
+        # — a re-run can only inject anchoring noise (live root cause of daily churn:
+        # phi3:mini walked held names' conviction ±0.05/eval for days, straight through
+        # market-closed weekends, forcing floor-crossing exits and re-buys). The
+        # deterministic invalidation and take-profit checks above have already run.
+        evidence = _evidence_hash(composite_str, news_str)
+        acfg = getattr(self._config, "autonomy", None)
+        if (
+            acfg is not None
+            and getattr(acfg, "skip_reeval_unchanged_evidence", False)
+            and evidence == _last_evidence_hash(thesis)
+        ):
+            logger.info("thesis {s} re-eval skipped: evidence unchanged", s=thesis.symbol)
+            return "unchanged_evidence"
+
         # Outcome-aware re-eval: inject the compact track-record block only when the
         # loop is enabled AND there is a real block to show; otherwise the base prompt
         # is used byte-for-byte unchanged (no KeyError, no empty section).
@@ -442,7 +517,29 @@ class ThesisEvaluator:
             thesis.invalidation_conditions = update.invalidation_conditions
         if update.exit_conditions:
             thesis.exit_conditions = update.exit_conditions
-        record_conviction_update(session, thesis, update.conviction, trigger="llm_reeval")
+        # Rate limit: bound the move against where conviction stood 24h ago, so an
+        # anchored walk covers at most max_conviction_delta_per_day per day. When the
+        # clamp BINDS, withhold the evidence hash — the model's view is not yet
+        # absorbed, so the next cycle must re-run rather than skip, stepping toward it
+        # at the capped rate. Hard breaks still exit via invalidation, never this path.
+        new_conviction = update.conviction
+        cap = getattr(getattr(self._config, "sizing", None), "max_conviction_delta_per_day", 0.0)
+        clamp_bound = False
+        if cap > 0:
+            baseline = _conviction_baseline(thesis, _utcnow_naive())
+            if baseline is not None:
+                bounded = min(max(new_conviction, baseline - cap), baseline + cap)
+                if bounded != new_conviction:
+                    clamp_bound = True
+                    logger.info(
+                        "thesis {s} conviction move clamped {a:.2f}->{b:.2f} (±{c:.2f}/day)",
+                        s=thesis.symbol, a=new_conviction, b=bounded, c=cap,
+                    )
+                    new_conviction = bounded
+        record_conviction_update(
+            session, thesis, new_conviction, trigger="llm_reeval",
+            evidence_hash=None if clamp_bound else evidence,
+        )
         return "updated"
 
     def generate(self, session: "Session", symbol: str, *, account_id: str | None = None) -> Thesis | None:
@@ -569,7 +666,7 @@ def run_maintenance(
     acfg = config.autonomy
     floor = config.sizing.min_conviction_to_hold
     counts = {"invalidated": 0, "exited": 0, "updated": 0, "unchanged": 0,
-              "benched": 0, "revived": 0, "skipped_benched": 0}
+              "unchanged_evidence": 0, "benched": 0, "revived": 0, "skipped_benched": 0}
 
     from investment_monitor.storage import get_active_theses
 

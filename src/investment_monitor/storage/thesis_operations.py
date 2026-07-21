@@ -54,13 +54,22 @@ def save_thesis(session: Session, thesis: Thesis) -> int:
 
 
 def record_conviction_update(
-    session: Session, thesis: Thesis, new_conviction: float, trigger: str
+    session: Session, thesis: Thesis, new_conviction: float, trigger: str,
+    *, evidence_hash: str | None = None,
 ) -> None:
-    """Set conviction (clamped 0-1), stamp the re-eval time, append to the audit history."""
+    """Set conviction (clamped 0-1), stamp the re-eval time, append to the audit history.
+
+    ``evidence_hash`` (LLM re-evals only) fingerprints the evidence the model saw, so
+    the next re-eval can skip the call when nothing changed. Callers withhold it when
+    the update was rate-limit clamped — the un-absorbed evidence must trigger a re-run.
+    """
     clamped = max(0.0, min(1.0, float(new_conviction)))
     # Reassign (not in-place mutate) so SQLAlchemy flags the JSON column dirty.
     history = list(thesis.conviction_history or [])
-    history.append({"ts": _utcnow().isoformat(), "conviction": clamped, "trigger": trigger})
+    entry: dict = {"ts": _utcnow().isoformat(), "conviction": clamped, "trigger": trigger}
+    if evidence_hash:
+        entry["evidence_hash"] = evidence_hash
+    history.append(entry)
     thesis.conviction_history = history
     thesis.conviction = clamped
     thesis.last_evaluated_at = _utcnow()
