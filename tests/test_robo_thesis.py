@@ -484,7 +484,8 @@ def test_evaluator_updates_conviction(tmp_path):
         save_thesis(s, Thesis(symbol="VOO", conviction=0.5, narrative="old",
                               status=ThesisStatus.ACTIVE.value))
     llm = _FakeLLM('{"narrative": "Improving fundamentals", "conviction": 0.8}')
-    evaluator = ThesisEvaluator(llm, _autonomous_config())
+    # Rate limit off: this test pins the plain LLM-update path (the limit has its own tests).
+    evaluator = ThesisEvaluator(llm, _autonomous_config(max_conviction_delta_per_day=0.0))
     with get_session() as s:
         t = get_thesis(s, "VOO")
         action = evaluator.evaluate(s, t)
@@ -745,3 +746,193 @@ def test_benched_thesis_gets_no_weight(tmp_path):
         weights = compute_conviction_weights(s, _autonomous_config())
     assert weights.get("LIVE", 0) > 0
     assert "BENCH" not in weights  # benched = tracked but never sized
+
+
+# --------------------------------------------------------------------------- #
+# H. Conviction-noise guards (2026-07 live churn root cause):
+#    evidence-gated re-evals, per-day conviction rate limit, exit dwell +
+#    sub-floor re-entry cooldown. Live, phi3:mini anchored on the prompt's
+#    "Current conviction" and walked held names ±0.05/eval through the 0.35
+#    floor and back (LLY 0.95->0.25->0.94 over six days, sold and re-bought).
+# --------------------------------------------------------------------------- #
+def _hist_entry(days_ago: float, conviction: float, trigger: str = "test", **extra):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return {"ts": (now - timedelta(days=days_ago)).isoformat(),
+            "conviction": conviction, "trigger": trigger, **extra}
+
+
+def _guard_thesis(history):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(conviction_history=history)
+
+
+def test_exit_dwell_pure():
+    from datetime import datetime, timezone
+
+    from investment_monitor.robo.sizing import in_exit_dwell
+
+    now = datetime.now(timezone.utc)
+    cfg = SizingConfig()  # exit_dwell_days=2 default
+    # Floor-strength 1 day ago: the dip is fresh -> dwell holds.
+    fresh_dip = _guard_thesis([_hist_entry(1.0, 0.9), _hist_entry(0.1, 0.2)])
+    assert in_exit_dwell(fresh_dip, cfg, now)
+    # Floor-strength last seen 3 days ago: dwell over -> exit proceeds.
+    stale_dip = _guard_thesis([_hist_entry(3.0, 0.9), _hist_entry(0.1, 0.2)])
+    assert not in_exit_dwell(stale_dip, cfg, now)
+    # Timestamp-less birth entry (fresh promotion) never grants a dwell.
+    birth_only = _guard_thesis([{"conviction": 0.9, "trigger": "generated"}])
+    assert not in_exit_dwell(birth_only, cfg, now)
+    # 0 disables.
+    assert not in_exit_dwell(fresh_dip, SizingConfig(exit_dwell_days=0.0), now)
+
+
+def test_reentry_cooldown_pure():
+    from datetime import datetime, timezone
+
+    from investment_monitor.robo.sizing import in_reentry_cooldown
+
+    now = datetime.now(timezone.utc)
+    cfg = SizingConfig()  # sub_floor_reentry_days=3 default
+    # Walked through the floor yesterday, back above today: still cooling off.
+    recent_walk = _guard_thesis([_hist_entry(1.0, 0.2), _hist_entry(0.1, 0.9)])
+    assert in_reentry_cooldown(recent_walk, cfg, now)
+    # The sub-floor point is outside the window: eligible again.
+    old_walk = _guard_thesis([_hist_entry(5.0, 0.2), _hist_entry(0.1, 0.9)])
+    assert not in_reentry_cooldown(old_walk, cfg, now)
+    # A fresh confluence signal AFTER the dip overrides the cooldown (revival invariant).
+    confluence = _guard_thesis([
+        _hist_entry(1.0, 0.2),
+        _hist_entry(0.5, 0.9, trigger="confluence-revival:insider_cluster"),
+    ])
+    assert not in_reentry_cooldown(confluence, cfg, now)
+    # 0 disables.
+    assert not in_reentry_cooldown(recent_walk, SizingConfig(sub_floor_reentry_days=0.0), now)
+
+
+def test_conviction_weights_dwell_freezes_held_dip(tmp_path):
+    # A HELD name whose smoothed conviction just dipped sub-floor keeps its CURRENT
+    # weight (zero trades) instead of full-exiting; unheld names still drop out.
+    init_db(tmp_path / "t.db")
+    dip_history = [_hist_entry(1.5, 0.5), _hist_entry(0.5, 0.2), _hist_entry(0.1, 0.2)]
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="DIP", conviction=0.2, status=ThesisStatus.ACTIVE.value,
+                              conviction_history=dip_history))
+    cfg = _autonomous_config()
+    with get_session() as s:
+        held = compute_conviction_weights(
+            s, cfg, held_symbols={"DIP"}, held_weights={"DIP": 0.11})
+        unheld = compute_conviction_weights(s, cfg)
+    assert held["DIP"] == 0.11        # frozen at the actual held weight
+    assert "DIP" not in unheld        # never held -> no dwell, no capital
+
+
+def test_conviction_weights_dwell_expires_to_full_exit(tmp_path):
+    # Same dip, but floor-strength was last seen beyond exit_dwell_days: sell fires.
+    init_db(tmp_path / "t.db")
+    stale_history = [_hist_entry(3.0, 0.5), _hist_entry(1.0, 0.2), _hist_entry(0.1, 0.2)]
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="DIP", conviction=0.2, status=ThesisStatus.ACTIVE.value,
+                              conviction_history=stale_history))
+    with get_session() as s:
+        weights = compute_conviction_weights(
+            s, _autonomous_config(), held_symbols={"DIP"}, held_weights={"DIP": 0.11})
+    assert "DIP" not in weights
+
+
+def test_conviction_weights_reentry_cooldown_blocks_new_position(tmp_path):
+    # Conviction recovered above the floor, but the name walked sub-floor 2 days ago:
+    # no NEW position yet. Held names are exempt (they were never sold).
+    init_db(tmp_path / "t.db")
+    walk_history = [_hist_entry(2.0, 0.2), _hist_entry(1.0, 0.55), _hist_entry(0.1, 0.9)]
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="WALK", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+                              conviction_history=walk_history))
+    cfg = _autonomous_config()
+    with get_session() as s:
+        as_new = compute_conviction_weights(s, cfg)
+        as_held = compute_conviction_weights(s, cfg, held_symbols={"WALK"})
+    assert "WALK" not in as_new
+    assert as_held.get("WALK", 0) > 0
+
+
+def test_conviction_weights_dwell_reserves_topn_slot(tmp_path):
+    # The dwell stub is tiny by construction; a challenger must NOT win its slot on
+    # size during the window — the rotation decision is deferred, not delegated.
+    from investment_monitor.robo.config import RoboCaps
+
+    init_db(tmp_path / "t.db")
+    dip_history = [_hist_entry(1.0, 0.5), _hist_entry(0.1, 0.2)]
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="DIP", conviction=0.2, status=ThesisStatus.ACTIVE.value,
+                              conviction_history=dip_history))
+        save_thesis(s, Thesis(symbol="BIG1", conviction=0.95, status=ThesisStatus.ACTIVE.value))
+        save_thesis(s, Thesis(symbol="BIG2", conviction=0.94, status=ThesisStatus.ACTIVE.value))
+    cfg = _autonomous_config().model_copy(update={"caps": RoboCaps(
+        max_order_pct=0.5, max_orders_per_run=10, max_orders_per_day=20, max_positions=2)})
+    with get_session() as s:
+        weights = compute_conviction_weights(
+            s, cfg, held_symbols={"DIP"}, held_weights={"DIP": 0.05})
+    assert weights["DIP"] == 0.05                      # slot reserved for the dwell
+    assert ("BIG1" in weights) and ("BIG2" not in weights)  # one free slot left
+
+
+def test_evaluator_skips_reeval_on_unchanged_evidence(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", conviction=0.5, narrative="old",
+                              status=ThesisStatus.ACTIVE.value))
+    llm = _FakeLLM('{"narrative": "same story", "conviction": 0.6}')
+    evaluator = ThesisEvaluator(llm, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "VOO")
+        assert evaluator.evaluate(s, t) == "updated"       # first look: hash recorded
+        assert t.conviction_history[-1].get("evidence_hash")
+        n_points = len(t.conviction_history)
+        assert evaluator.evaluate(s, t) == "unchanged_evidence"  # nothing new -> no LLM noise
+        assert t.conviction == 0.6
+        assert len(t.conviction_history) == n_points       # and no history spam
+    # Master switch off -> the old always-re-eval behavior returns.
+    from investment_monitor.robo.config import AutonomyConfig
+
+    permissive = _autonomous_config().model_copy(
+        update={"autonomy": AutonomyConfig(skip_reeval_unchanged_evidence=False)})
+    with get_session() as s:
+        t = get_thesis(s, "VOO")
+        assert ThesisEvaluator(llm, permissive).evaluate(s, t) == "updated"
+
+
+def test_evaluator_rate_limits_conviction_move(tmp_path):
+    # A collapse bigger than max_conviction_delta_per_day is clamped against the
+    # 24h-ago baseline, and the clamped update withholds its evidence hash so the
+    # NEXT cycle re-runs (keeps stepping) instead of skipping as "unchanged".
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", conviction=0.9, narrative="old",
+                              status=ThesisStatus.ACTIVE.value,
+                              conviction_history=[_hist_entry(1.5, 0.9)]))
+    llm = _FakeLLM('{"narrative": "suddenly bearish", "conviction": 0.2}')
+    evaluator = ThesisEvaluator(llm, _autonomous_config())  # default cap 0.15/day
+    with get_session() as s:
+        t = get_thesis(s, "VOO")
+        assert evaluator.evaluate(s, t) == "updated"
+        assert abs(t.conviction - 0.75) < 1e-9             # 0.9 - 0.15, not 0.2
+        assert not t.conviction_history[-1].get("evidence_hash")
+        assert evaluator.evaluate(s, t) == "updated"       # clamped -> next eval re-runs
+        assert abs(t.conviction - 0.75) < 1e-9             # still bounded by the 24h baseline
+
+
+def test_evaluator_rate_limit_zero_disables(tmp_path):
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(symbol="VOO", conviction=0.9, narrative="old",
+                              status=ThesisStatus.ACTIVE.value,
+                              conviction_history=[_hist_entry(1.5, 0.9)]))
+    llm = _FakeLLM('{"narrative": "suddenly bearish", "conviction": 0.2}')
+    evaluator = ThesisEvaluator(llm, _autonomous_config(max_conviction_delta_per_day=0.0))
+    with get_session() as s:
+        t = get_thesis(s, "VOO")
+        assert evaluator.evaluate(s, t) == "updated"
+        assert abs(t.conviction - 0.2) < 1e-9              # unclamped

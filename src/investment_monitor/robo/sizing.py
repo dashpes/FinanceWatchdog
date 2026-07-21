@@ -13,7 +13,7 @@ reads theses + simulations from the DB and threads the pure functions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Sequence
 
 from loguru import logger
@@ -221,6 +221,78 @@ def select_top_positions(
     return kept
 
 
+def _history_points(thesis) -> list[tuple[datetime, float, str]]:
+    """Parsed ``(naive-UTC ts, conviction, trigger)`` conviction-history rows.
+
+    Timestamp-less points (a fresh thesis's birth entry) and malformed rows are
+    skipped — the floor guards below must never fire on a brand-new name.
+    """
+    out: list[tuple[datetime, float, str]] = []
+    for point in thesis.conviction_history or []:
+        if not isinstance(point, dict):
+            continue
+        ts_raw = point.get("ts")
+        try:
+            ts = datetime.fromisoformat(str(ts_raw)) if ts_raw else None
+        except ValueError:
+            ts = None
+        if ts is None:
+            continue
+        if ts.tzinfo:
+            ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+        try:
+            conv = float(point.get("conviction"))
+        except (TypeError, ValueError):
+            continue
+        out.append((ts, conv, str(point.get("trigger") or "")))
+    return out
+
+
+def in_exit_dwell(thesis, cfg: SizingConfig, now: datetime) -> bool:
+    """Pure: is a HELD sub-floor name still inside its exit-dwell grace window?
+
+    True while the newest recorded at-or-above-floor conviction point is younger
+    than ``exit_dwell_days`` — i.e. the name showed floor-strength recently, so the
+    dip may be re-eval noise and the position is held (frozen) instead of sold. A
+    name with no timestamped floor-strength on record gets no dwell. Only the noisy
+    LLM channel passes through here: invalidated/exited theses never reach sizing.
+    """
+    if cfg.exit_dwell_days <= 0:
+        return False
+    last_above: datetime | None = None
+    for ts, conv, _trigger in _history_points(thesis):
+        if conv >= cfg.min_conviction_to_hold and (last_above is None or ts > last_above):
+            last_above = ts
+    if last_above is None:
+        return False
+    return _age_days(last_above, now) < cfg.exit_dwell_days
+
+
+def in_reentry_cooldown(thesis, cfg: SizingConfig, now: datetime) -> bool:
+    """Pure: is a NOT-held name barred from opening a position right now?
+
+    True when any recorded conviction point inside ``sub_floor_reentry_days`` sits
+    below ``min_conviction_to_hold`` — a name that just walked out through the floor
+    must hold floor-strength for the window before capital returns, so one noisy
+    descent-and-recovery can't round-trip a position. A confluence trigger at/after
+    the last sub-floor point overrides the cooldown: a fresh hard signal (the
+    system's edge) trades immediately, per the bench-revival invariant.
+    """
+    if cfg.sub_floor_reentry_days <= 0:
+        return False
+    points = _history_points(thesis)
+    cutoff = _to_naive_utc(now) - timedelta(days=cfg.sub_floor_reentry_days)
+    last_sub: datetime | None = None
+    for ts, conv, _trigger in points:
+        if ts >= cutoff and conv < cfg.min_conviction_to_hold and (last_sub is None or ts > last_sub):
+            last_sub = ts
+    if last_sub is None:
+        return False
+    return not any(
+        ts >= last_sub and trigger.startswith("confluence") for ts, _conv, trigger in points
+    )
+
+
 def is_averaging_up_without_support(
     *,
     avg_cost: float | None,
@@ -304,6 +376,7 @@ def compute_conviction_weights(
     account_id: str | None = None,
     now: datetime | None = None,
     held_symbols: set[str] | None = None,
+    held_weights: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Build a target allocation from live theses (autonomous mode).
 
@@ -312,14 +385,19 @@ def compute_conviction_weights(
     total equity at ``1 - min_cash_weight`` (scaling down proportionally if over), and
     lets CASH absorb the remainder. Returns ``{symbol: weight}`` summing to 1.0,
     always including CASH. ``held_symbols`` (when the caller knows the account state)
-    enables selection hysteresis so noise can't rotate real positions.
+    enables selection hysteresis so noise can't rotate real positions;
+    ``held_weights`` ({symbol: current portfolio weight}) additionally lets the
+    exit-dwell freeze a just-dipped name at its actual weight (zero trades) instead
+    of a floor-conviction stub.
     """
     now = now or datetime.now(timezone.utc)
     cfg = config.sizing
     lcfg = getattr(config, "learning", None)
     use_accuracy = lcfg is not None and lcfg.enabled and lcfg.accuracy_sizing
+    held = frozenset(held_symbols or ()) | frozenset(held_weights or ())
 
     raw: dict[str, float] = {}
+    dwell: dict[str, float] = {}
     for thesis in get_active_theses(session, account_id):
         # Benched (WATCH) theses stay tracked but get NO capital — otherwise the
         # over-cap bench below would be undone right here on the next sizing pass.
@@ -333,6 +411,25 @@ def compute_conviction_weights(
         # stale value toward conviction_floor (0.5) and could otherwise re-inflate a
         # weak/zero name back above the drop threshold.
         if smoothed < cfg.min_conviction_to_hold:
+            # Exit dwell: a HELD name that only JUST dipped sub-floor holds its position
+            # (frozen at its current weight when known) instead of full-exiting — live,
+            # LLM re-eval noise walked convictions through the floor and back within
+            # days, round-tripping real positions. A dip that recants inside the dwell
+            # trades ZERO times. Real breaks invalidate/exit upstream and never get here.
+            if thesis.symbol in held and in_exit_dwell(thesis, cfg, now):
+                current = (held_weights or {}).get(thesis.symbol) or 0.0
+                stub = current if current > 0 else size_position(
+                    cfg.min_conviction_to_hold,
+                    risk_from_sim(_latest_sim(session, thesis.symbol)),
+                    cfg,
+                )
+                if stub > 0:
+                    dwell[thesis.symbol] = min(stub, cfg.max_position_weight)
+            continue
+        # Re-entry cooldown: a name that walked below the floor inside the window may
+        # not OPEN a new position yet (held names are unaffected; a fresh confluence
+        # signal overrides — see in_reentry_cooldown).
+        if thesis.symbol not in held and in_reentry_cooldown(thesis, cfg, now):
             continue
         # Then the usual time-decay for the SIZING magnitude.
         eff_conviction = decay_conviction(smoothed, _age_days(thesis.last_evaluated_at, now), cfg)
@@ -351,11 +448,26 @@ def compute_conviction_weights(
     # Concentration cap: keep only the top-N names by size, so a long tail of small theses
     # doesn't spread the book thin (the rest of the intended equity falls to cash/the ETF).
     # Held incumbents get hysteresis so a ±0.02 conviction wobble can't flip a position.
-    raw = select_top_positions(
-        raw, config.caps.max_positions,
-        held=held_symbols or frozenset(),
-        hysteresis=cfg.selection_hysteresis,
-    )
+    # Dwell names hold their slot UNCONDITIONALLY for the window — their frozen stub is
+    # tiny by construction, so letting challengers outbid it would instantly undo the
+    # dwell; the rotation decision is deferred until the dip resolves, not delegated.
+    max_positions = config.caps.max_positions
+    if max_positions and max_positions > 0 and dwell:
+        free_slots = max_positions - len(dwell)
+        raw = (
+            select_top_positions(
+                raw, free_slots,
+                held=held, hysteresis=cfg.selection_hysteresis,
+            )
+            if free_slots > 0 else {}
+        )
+    else:
+        raw = select_top_positions(
+            raw, max_positions,
+            held=held,
+            hysteresis=cfg.selection_hysteresis,
+        )
+    raw.update(dwell)
 
     # Keep at least min_cash_weight in cash: scale equity down proportionally if over.
     total = sum(raw.values())
@@ -386,6 +498,8 @@ __all__ = [
     "size_position",
     "select_top_positions",
     "accuracy_multiplier",
+    "in_exit_dwell",
+    "in_reentry_cooldown",
     "is_averaging_up_without_support",
     "compute_conviction_weights",
 ]

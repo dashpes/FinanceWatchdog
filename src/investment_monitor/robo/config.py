@@ -243,6 +243,28 @@ class SizingConfig(BaseModel):
         json_schema_extra={"x_ui": {"group": "Sizing", "control": "slider",
                                     "min": 0.0, "max": 1.0, "step": 0.05, "unit": "fraction"}},
     )
+    # Exit dwell at the conviction floor: a HELD name whose smoothed conviction dips below
+    # min_conviction_to_hold keeps its position (frozen at its current weight, slot
+    # reserved) for this many days before the full exit fires. The live churn driver was
+    # LLM conviction random-walking through the floor and back (LLY 0.95->0.25->0.94 in
+    # ±0.05 steps over six days, sold and re-bought around it) — a dip that recants inside
+    # the dwell produces ZERO trades. Real thesis breaks are untouched: deterministic
+    # invalidation and take-profit exit immediately and never enter this path. 0 = off.
+    exit_dwell_days: float = Field(default=2.0, ge=0)
+    # Re-entry cooldown at the conviction floor: a name may not OPEN a new position while
+    # any recorded conviction point inside this window is below min_conviction_to_hold —
+    # a name that just walked out through the floor must prove floor-strength for a while
+    # before capital returns (the other half of the LLY round trip above). A fresh
+    # confluence finding overrides the cooldown (that signal is the system's edge and
+    # must trade immediately). 0 = off.
+    sub_floor_reentry_days: float = Field(default=3.0, ge=0)
+    # Rate limit on LLM conviction moves: a re-eval may shift conviction at most this far
+    # from where it stood 24h earlier. phi-scale models anchor on the prompt's "Current
+    # conviction" and emit ±0.05 near-deterministically with the direction persisting for
+    # days (JPM walked 0.90->0.35 across a CLOSED-market weekend), so an uncapped walk
+    # covers 0.5/day. Hard qualitative breaks still exit via invalidation keywords/price,
+    # which bypass conviction entirely. 0 = off.
+    max_conviction_delta_per_day: float = Field(default=0.15, ge=0, le=1.0)
     # Always leave at least this fraction of the portfolio in cash (autonomous mode).
     min_cash_weight: float = Field(
         default=0.05, ge=0, lt=1.0,
@@ -365,6 +387,12 @@ class AutonomyConfig(BaseModel):
     # Benched theses get one LLM re-evaluation this often (they keep hourly-cheap
     # deterministic coverage only while benched).
     bench_reeval_days: float = Field(default=7.0, gt=0)
+    # Skip the LLM conviction re-eval when the evidence the prompt would show (factor
+    # scores + headlines) is byte-identical to the last re-eval's. With nothing new to
+    # weigh, a re-run can only inject model noise — live, phi3:mini walked convictions
+    # ±0.05 per eval straight through market-closed weekends. Deterministic invalidation
+    # and take-profit checks always run regardless; price action belongs to those layers.
+    skip_reeval_unchanged_evidence: bool = True
 
 
 class LearningConfig(BaseModel):

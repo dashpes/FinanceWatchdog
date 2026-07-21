@@ -207,11 +207,19 @@ class RoboProposer:
 
         # Base target allocation: conviction-driven (autonomous) or fixed (rebalance).
         if autonomous:
+            total_value = account_state.total_value
             base_alloc = compute_conviction_weights(
                 session, self._config, account_id=account_id,
                 # Held names get selection hysteresis: an incumbent position is only
                 # rotated out by a clearly stronger challenger, never by rank noise.
                 held_symbols={p.symbol for p in account_state.positions},
+                # Actual weights let the exit-dwell freeze a just-dipped name at its
+                # current size — zero trades while the dip proves real or recants.
+                held_weights={
+                    p.symbol: float(p.market_value / total_value)
+                    for p in account_state.positions
+                    if p.quantity > 0
+                } if total_value > 0 else None,
             )
             # Held names with no live thesis are trimmed to 0 so they get sold.
             for p in account_state.positions:
