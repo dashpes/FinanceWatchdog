@@ -15,18 +15,34 @@ is its take-profit twin ("the thesis played out"): same pure-predicate contract,
 it trips the EXITED status instead of INVALIDATED. Keys (all optional; a value <= 0
 disables that trigger, so config defaults can be selectively overridden per thesis):
   * ``profit_target_pct``  — exit once the gain from entry reaches this percent
-  * ``trailing_stop_pct``  — exit this percent below the post-entry high-water mark,
-    armed only once the high-water gain reaches ``trailing_arm_pct`` (default 10) so
-    a fresh, flat position can't be stopped out on noise
+  * ``trailing_giveback_pct`` — exit once the position has given back this percent of
+    its PEAK GAIN, armed at ``trailing_arm_pct``. This is the profit-protecting trail:
+    it exits at ``peak_gain x (1 - giveback)``, which is always a REAL gain.
+  * ``trailing_stop_pct``  — legacy price-distance trail: exit this percent below the
+    post-entry high. OFF by default, because it measures the fall against the peak
+    PRICE, so the exit lands at ``peak x (1 - trail)``: at the shipped 15%, a position
+    had to peak at +17.6% merely to break even and a +12% peak exited at -4.8%. Live,
+    that band was where nearly every position actually peaked, so the mechanism could
+    only ever realize losses (audited 2026-07-21: 0 take-profits in ~30 round-trips).
+    Kept for explicit per-thesis use; prefer ``trailing_giveback_pct``.
   * ``max_hold_days``      — exit after this many days regardless (the signal's edge
     has a shelf life; the walk-forward backtest models this same horizon exit)
+
+Both trails require ``high_water_mark``; the caller maintains it. Whichever condition
+fires first wins, and the profit target is checked before either trail.
 """
 
 from __future__ import annotations
 
-# Trailing stop arms only after the high-water gain reaches this percent (overridable
+# Trailing stops arm only after the high-water gain reaches this percent (overridable
 # per thesis via the `trailing_arm_pct` key).
 DEFAULT_TRAILING_ARM_PCT = 10.0
+
+# Percentage-point tolerance on threshold comparisons. Entry/high-water/last prices are
+# floats, so a position sitting EXACTLY on a threshold (peak 11.2 from entry 10.0 giving
+# back exactly 40%) otherwise fires or not on 14th-decimal noise. Exits must be
+# deterministic at the boundary.
+_EPS = 1e-9
 
 
 def entry_basis(entry_conditions: dict | None) -> float | None:
@@ -45,6 +61,25 @@ def entry_basis(entry_conditions: dict | None) -> float | None:
         except (KeyError, TypeError, ValueError):
             continue
     return None
+
+
+def with_vol_target(conditions: dict, vol_target_pct: float | None) -> dict:
+    """Pure: overlay a volatility-scaled profit target onto a conditions dict.
+
+    Keeps the EARLIER of the vol-scaled target and any explicit per-thesis target: the
+    explicit number reflects the thesis, the vol number reflects what the name can
+    plausibly reach over the hold horizon, and taking the minimum banks a gain as soon
+    as EITHER says the move has played out. ``None`` leaves the conditions untouched.
+    """
+    if vol_target_pct is None or vol_target_pct <= 0:
+        return conditions
+    out = dict(conditions)
+    try:
+        explicit = float(out.get("profit_target_pct") or 0.0)
+    except (TypeError, ValueError):
+        explicit = 0.0
+    out["profit_target_pct"] = min(explicit, vol_target_pct) if explicit > 0 else vol_target_pct
+    return out
 
 
 def check_exit(
@@ -79,23 +114,39 @@ def check_exit(
                 f"${entry_price:.2f} (>= {target:g}%)"
             )
 
-    trail = _pos("trailing_stop_pct")
-    if (
-        trail is not None
-        and latest_price is not None
+    trail_ready = (
+        latest_price is not None
         and high_water_mark
         and high_water_mark > 0
         and entry_price
         and entry_price > 0
-    ):
+    )
+    if trail_ready:
         arm = _pos("trailing_arm_pct") or DEFAULT_TRAILING_ARM_PCT
         hwm_gain = (high_water_mark - entry_price) / entry_price * 100.0
-        fall = (high_water_mark - latest_price) / high_water_mark * 100.0
-        if hwm_gain >= arm and fall >= trail:
-            return (
-                f"trailing stop: {fall:.1f}% below the ${high_water_mark:.2f} high "
-                f"(>= {trail:g}%, peak gain {hwm_gain:.1f}%)"
-            )
+        gain = (latest_price - entry_price) / entry_price * 100.0
+
+        # Give back at most this share of the PEAK GAIN. Exits at hwm_gain x (1-giveback),
+        # so a protected position always books a real profit: a +12% peak with a 40%
+        # giveback exits at +7.2% (the price-distance trail below would exit it at -4.8%).
+        giveback = _pos("trailing_giveback_pct")
+        if giveback is not None and hwm_gain >= arm - _EPS:
+            keep = hwm_gain * (1.0 - min(giveback, 100.0) / 100.0)
+            if gain <= keep + _EPS:
+                return (
+                    f"trailing giveback: gave back {hwm_gain - gain:.1f} of "
+                    f"{hwm_gain:.1f} pts peak gain (>= {giveback:g}%), holding +{gain:.1f}%"
+                )
+
+        # Legacy price-distance trail (off by default — see the module docstring).
+        trail = _pos("trailing_stop_pct")
+        if trail is not None and hwm_gain >= arm - _EPS:
+            fall = (high_water_mark - latest_price) / high_water_mark * 100.0
+            if fall >= trail - _EPS:
+                return (
+                    f"trailing stop: {fall:.1f}% below the ${high_water_mark:.2f} high "
+                    f"(>= {trail:g}%, peak gain {hwm_gain:.1f}%)"
+                )
 
     horizon = _pos("max_hold_days")
     if horizon is not None and days_held is not None and days_held >= horizon:

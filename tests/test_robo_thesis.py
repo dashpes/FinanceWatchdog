@@ -219,6 +219,88 @@ def test_exit_trailing_stop_arms_then_fires():
     assert check_exit(cond, entry_price=10.0, latest_price=12.15, high_water_mark=13.5) is None
 
 
+def test_exit_giveback_trail_banks_a_real_gain():
+    # THE fix for "positions up 10-15% never took profit, then sold at a loss".
+    # Peak +12%, giveback 40% -> exit once the gain falls to +7.2%: still a PROFIT.
+    # The price-distance trail at the shipped 15% would have exited the identical
+    # position at -4.8% (1.12 x 0.85), which is why it never banked anything.
+    cond = {"trailing_giveback_pct": 40, "trailing_arm_pct": 8}
+    assert check_exit(cond, entry_price=10.0, latest_price=11.3, high_water_mark=11.2) is None
+    reason = check_exit(cond, entry_price=10.0, latest_price=10.72, high_water_mark=11.2)
+    assert reason is not None and "trailing giveback" in reason
+    assert "+7.2%" in reason  # the exit is above entry, by construction
+    # Same peak under the OLD mechanism exits below entry — the bug, pinned.
+    old = check_exit({"trailing_stop_pct": 15, "trailing_arm_pct": 10},
+                     entry_price=10.0, latest_price=9.52, high_water_mark=11.2)
+    assert old is not None  # fires at -4.8%: a loss
+
+
+def test_exit_giveback_arms_and_scales_with_peak():
+    cond = {"trailing_giveback_pct": 40, "trailing_arm_pct": 8}
+    # Peak only +5% -> not armed, no exit (that downside is invalidation's job).
+    assert check_exit(cond, entry_price=10.0, latest_price=10.0, high_water_mark=10.5) is None
+    # Bigger peak -> proportionally more room: +50% peak keeps riding down to +30%.
+    assert check_exit(cond, entry_price=10.0, latest_price=13.5, high_water_mark=15.0) is None
+    assert check_exit(cond, entry_price=10.0, latest_price=12.9, high_water_mark=15.0) is not None
+    # 0 disables; the legacy price trail still works when explicitly set.
+    assert check_exit({"trailing_giveback_pct": 0}, entry_price=10.0,
+                      latest_price=10.72, high_water_mark=11.2) is None
+
+
+def test_exit_config_defaults_flip_to_giveback():
+    from investment_monitor.robo.config import ExitConfig
+
+    cond = ExitConfig().as_conditions()
+    assert cond["trailing_giveback_pct"] == 40.0
+    assert cond["trailing_stop_pct"] == 0.0   # the loss-making price trail is OFF
+    assert cond["trailing_arm_pct"] == 8.0
+
+
+def test_vol_scaled_target_math_and_clamps():
+    from investment_monitor.robo.config import ExitConfig
+
+    cfg = ExitConfig()  # 1.5 sigma, 60d default horizon, band [8, 60]
+    # Mega cap: 20% annualized vol over 60d -> sigma_60 ~8.1% -> target ~12.2%.
+    mega = cfg.vol_target_pct(0.20, 60)
+    assert 11.5 < mega < 13.0
+    # Small cap: 50% vol -> a far larger, still-reachable target.
+    small = cfg.vol_target_pct(0.50, 60)
+    assert small > mega and small < 60.0
+    # Clamped both ends; disabled/missing vol -> None (flat config target stands).
+    assert cfg.vol_target_pct(0.001, 60) == cfg.target_floor_pct
+    assert cfg.vol_target_pct(5.0, 60) == cfg.target_ceiling_pct
+    assert cfg.vol_target_pct(None, 60) is None
+    assert ExitConfig(vol_scaled_target=False).vol_target_pct(0.20, 60) is None
+
+
+def test_with_vol_target_takes_the_earlier_target():
+    from investment_monitor.robo.invalidation import with_vol_target
+
+    # Explicit +20% vs vol-scaled +12% -> bank at the earlier one.
+    assert with_vol_target({"profit_target_pct": 20.0}, 12.0)["profit_target_pct"] == 12.0
+    # A vol target LOOSER than the thesis's own does not loosen it.
+    assert with_vol_target({"profit_target_pct": 20.0}, 35.0)["profit_target_pct"] == 20.0
+    # No explicit target -> the vol target supplies one; None is a no-op.
+    assert with_vol_target({}, 12.0)["profit_target_pct"] == 12.0
+    assert with_vol_target({"profit_target_pct": 20.0}, None) == {"profit_target_pct": 20.0}
+
+
+def test_invalidation_floor_raises_noise_tight_stops():
+    from investment_monitor.robo.config import InvalidationConfig
+
+    icfg = InvalidationConfig()  # floor 8%
+    # The LLM's 5% and 3% stops (32 live theses had 5%) are noise for an equity.
+    assert icfg.floored({"price_drop_pct": 5.0})["price_drop_pct"] == 8.0
+    assert icfg.floored({"price_drop_pct": 3.0})["price_drop_pct"] == 8.0
+    # A wider stop is left alone, and other keys pass through untouched.
+    kept = icfg.floored({"price_drop_pct": 20.0, "keywords": ["fraud"]})
+    assert kept["price_drop_pct"] == 20.0 and kept["keywords"] == ["fraud"]
+    # 0 disables the floor; absent/garbage keys are no-ops.
+    assert InvalidationConfig(min_price_drop_pct=0).floored(
+        {"price_drop_pct": 3.0})["price_drop_pct"] == 3.0
+    assert icfg.floored({}) == {} and icfg.floored(None) == {}
+
+
 def test_exit_horizon_boundary():
     cond = {"max_hold_days": 90}
     assert check_exit(cond, days_held=90) is not None
@@ -568,13 +650,14 @@ def test_evaluator_trailing_stop_uses_high_water(tmp_path):
         ))
     from investment_monitor.storage import Price
     with get_session() as s:
-        s.add(Price(ticker="RIDE", date=date.today(), close=11.0))  # 18.5% off the high
+        s.add(Price(ticker="RIDE", date=date.today(), close=11.0))  # gave back 25 of 35 pts
     evaluator = ThesisEvaluator(None, _autonomous_config())
     with get_session() as s:
         t = get_thesis(s, "RIDE")
         assert evaluator.evaluate(s, t) == "exited"
         assert t.status == ThesisStatus.EXITED.value
-        assert "trailing stop" in t.conviction_history[-1]["trigger"]
+        # The giveback trail is now the default mechanism (the price-distance trail is off).
+        assert "trailing giveback" in t.conviction_history[-1]["trigger"]
 
 
 def test_evaluator_maintains_high_water_mark(tmp_path):
@@ -922,6 +1005,87 @@ def test_evaluator_rate_limits_conviction_move(tmp_path):
         assert not t.conviction_history[-1].get("evidence_hash")
         assert evaluator.evaluate(s, t) == "updated"       # clamped -> next eval re-runs
         assert abs(t.conviction - 0.75) < 1e-9             # still bounded by the 24h baseline
+
+
+def test_evaluator_banks_a_ten_pct_winner_end_to_end(tmp_path):
+    # The live complaint, end to end: a position peaks at +12% and fades. It must now
+    # EXIT AT A PROFIT rather than ride down into a stop-loss.
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="WINR", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 100.0, "fill_cost": 100.0},
+            invalidation_conditions={"price_drop_pct": 5.0},
+            high_water_mark=112.0,            # peaked +12%
+        ))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="WINR", date=date.today(), close=107.0))  # faded to +7%
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "WINR")
+        assert evaluator.evaluate(s, t) == "exited"
+        assert t.status == ThesisStatus.EXITED.value
+        trigger = t.conviction_history[-1]["trigger"]
+        assert "trailing giveback" in trigger and "+7.0%" in trigger
+
+
+def test_evaluator_noise_tight_stop_no_longer_invalidates(tmp_path):
+    # A 5% stop used to realize a loss on ordinary two-week noise; the 8% floor holds
+    # the position. A genuine break past the floor still invalidates.
+    init_db(tmp_path / "t.db")
+    for sym, close in (("NOISE", 94.0), ("BROKE", 88.0)):
+        with get_session() as s:
+            save_thesis(s, Thesis(
+                symbol=sym, conviction=0.9, status=ThesisStatus.ACTIVE.value,
+                entry_conditions={"entry_price": 100.0},
+                invalidation_conditions={"price_drop_pct": 5.0},
+            ))
+        from investment_monitor.storage import Price
+        with get_session() as s:
+            s.add(Price(ticker=sym, date=date.today(), close=close))
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        assert evaluator.evaluate(s, get_thesis(s, "NOISE")) != "invalidated"   # -6%: held
+        assert evaluator.evaluate(s, get_thesis(s, "BROKE")) == "invalidated"   # -12%: real
+
+
+def test_evaluator_vol_scaled_target_fires_on_a_mega_cap(tmp_path):
+    # A +20% thesis target is unreachable for a low-vol name; the vol-scaled target
+    # (~12% at 20% annualized vol over 60d) banks the move instead.
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="MEGA", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 100.0, "fill_cost": 100.0},
+            exit_conditions={"profit_target_pct": 20.0, "max_hold_days": 60.0},
+        ))
+        _seed_sim(s, "MEGA", drift=0.10, vol=0.20, cvar=-0.10)
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="MEGA", date=date.today(), close=113.0))  # +13%: under the 20%
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        t = get_thesis(s, "MEGA")
+        assert evaluator.evaluate(s, t) == "exited"
+        assert "profit target" in t.conviction_history[-1]["trigger"]
+
+
+def test_evaluator_vol_target_absent_sim_keeps_flat_target(tmp_path):
+    # No simulation -> the explicit thesis target stands unchanged (fail-open).
+    init_db(tmp_path / "t.db")
+    with get_session() as s:
+        save_thesis(s, Thesis(
+            symbol="NOSIM", conviction=0.9, status=ThesisStatus.ACTIVE.value,
+            entry_conditions={"entry_price": 100.0, "fill_cost": 100.0},
+            exit_conditions={"profit_target_pct": 20.0},
+        ))
+    from investment_monitor.storage import Price
+    with get_session() as s:
+        s.add(Price(ticker="NOSIM", date=date.today(), close=113.0))
+    evaluator = ThesisEvaluator(None, _autonomous_config())
+    with get_session() as s:
+        assert evaluator.evaluate(s, get_thesis(s, "NOSIM")) != "exited"  # +13% < 20%
 
 
 def test_evaluator_rate_limit_zero_disables(tmp_path):

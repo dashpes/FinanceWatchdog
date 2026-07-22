@@ -30,7 +30,12 @@ from investment_monitor.analysis.thesis_prompts import (
     THESIS_UPDATE_PROMPT,
     THESIS_UPDATE_PROMPT_WITH_OUTCOME,
 )
-from investment_monitor.robo.invalidation import check_exit, check_invalidation, entry_basis
+from investment_monitor.robo.invalidation import (
+    check_exit,
+    check_invalidation,
+    entry_basis,
+    with_vol_target,
+)
 from investment_monitor.storage import (
     Thesis,
     ThesisStatus,
@@ -142,6 +147,7 @@ def _sanitize_invalidation(conditions: dict) -> dict:
 # effectively disable the target. Keys absent/garbage -> fall back to config defaults.
 _EXIT_CLAMPS = {
     "profit_target_pct": (10.0, 200.0),
+    "trailing_giveback_pct": (10.0, 90.0),
     "trailing_stop_pct": (5.0, 50.0),
     "trailing_arm_pct": (0.0, 100.0),
     "max_hold_days": (10.0, 365.0),
@@ -211,6 +217,32 @@ def _news_block(session: "Session", symbol: str, hours: int = 72) -> tuple[str, 
 def _latest_close(session: "Session", symbol: str) -> float | None:
     price = get_latest_price(session, symbol)
     return float(price.close) if price and price.close is not None else None
+
+
+def vol_scaled_conditions(session: "Session", symbol: str, ecfg, conditions: dict) -> dict:
+    """Exit conditions with the volatility-scaled profit target overlaid (impure lookup).
+
+    A flat percent target ignores what a name can actually deliver (+20% is ~4 sigma of
+    a mega cap's 30-day move but ~1.4 sigma of a small cap's), which is why the live
+    book's targets never fired once it pivoted to mega caps. Shared by the twice-daily
+    evaluator and the hourly sentinel so both judge an exit identically. Fully fail-open:
+    a missing sim or any lookup error leaves the conditions unchanged.
+    """
+    try:
+        if not getattr(ecfg, "vol_scaled_target", False):
+            return conditions
+        from investment_monitor.robo.sizing import _latest_sim
+
+        sim = _latest_sim(session, symbol)
+        if sim is None:
+            return conditions
+        return with_vol_target(
+            conditions,
+            ecfg.vol_target_pct(getattr(sim, "volatility", None), conditions.get("max_hold_days")),
+        )
+    except Exception as exc:  # noqa: BLE001 - a sim lookup must never block an exit check
+        logger.warning("vol-scaled target failed for {s}: {e}", s=symbol, e=exc)
+        return conditions
 
 
 def _evidence_hash(score_block: str, news_block: str) -> str:
@@ -432,8 +464,16 @@ class ThesisEvaluator:
             except Exception as exc:  # noqa: BLE001 - never crash on ledger write
                 logger.warning("outcome capture failed for {s}: {e}", s=thesis.symbol, e=exc)
 
+        # Stops tighter than ordinary noise are raised to the configured floor at CHECK
+        # time, so the 5%/3% stops the LLM already persisted onto live theses stop
+        # realizing losses on normal two-week wobble without needing a migration.
+        icfg = getattr(self._config, "invalidation", None)
+        inval_conditions = (
+            icfg.floored(thesis.invalidation_conditions)
+            if icfg is not None else thesis.invalidation_conditions
+        )
         reason = check_invalidation(
-            thesis.invalidation_conditions,
+            inval_conditions,
             entry_composite=entry.get("entry_composite"),
             latest_composite=latest_composite,
             entry_price=entry.get("entry_price"),
@@ -452,8 +492,12 @@ class ThesisEvaluator:
         update_high_water(session, thesis, latest_price)
         ecfg = getattr(self._config, "exits", None)
         if ecfg is not None and ecfg.enabled:
-            exit_reason = check_exit(
+            conditions = vol_scaled_conditions(
+                session, thesis.symbol, ecfg,
                 {**ecfg.as_conditions(), **(thesis.exit_conditions or {})},
+            )
+            exit_reason = check_exit(
+                conditions,
                 entry_price=entry_basis(entry),
                 latest_price=latest_price,
                 high_water_mark=thesis.high_water_mark,
