@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from loguru import logger
 
+from investment_monitor.analysis.thesis_evaluator import vol_scaled_conditions
 from investment_monitor.collectors.prices import PriceCollector
 from investment_monitor.config import Settings
 from investment_monitor.robo.config import RoboConfig
@@ -69,6 +70,7 @@ def run_sentinel(
     exited: list[str] = []
     flagged: list[str] = []
     ecfg = getattr(config, "exits", None)
+    icfg = getattr(config, "invalidation", None)
     exit_defaults = ecfg.as_conditions() if ecfg is not None and ecfg.enabled else None
     with get_session() as session:
         # ACTIVE only: benched (WATCH) names are unsized by definition — any held
@@ -101,7 +103,8 @@ def run_sentinel(
                 latest_price = float(latest.close) if latest and latest.close else None
                 entry_price = (thesis.entry_conditions or {}).get("entry_price")
                 reason = check_invalidation(
-                    thesis.invalidation_conditions,
+                    icfg.floored(thesis.invalidation_conditions)
+                    if icfg is not None else thesis.invalidation_conditions,
                     entry_price=float(entry_price) if entry_price else None,
                     latest_price=latest_price,
                 )
@@ -117,7 +120,10 @@ def run_sentinel(
                 update_high_water(session, thesis, latest_price)
                 if exit_defaults is not None:
                     exit_reason = check_exit(
-                        {**exit_defaults, **(thesis.exit_conditions or {})},
+                        vol_scaled_conditions(
+                            session, thesis.symbol, ecfg,
+                            {**exit_defaults, **(thesis.exit_conditions or {})},
+                        ),
                         entry_price=entry_basis(thesis.entry_conditions),
                         latest_price=latest_price,
                         high_water_mark=thesis.high_water_mark,

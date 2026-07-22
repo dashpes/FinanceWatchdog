@@ -301,24 +301,67 @@ class ExitConfig(BaseModel):
         json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
                                     "min": 0, "max": 200, "step": 5, "unit": "%"}},
     )
-    # Exit this percent below the post-entry high — protects an open gain from round-
-    # tripping (the entry-based price_drop_pct invalidation only catches it far lower).
+    # THE profit-protecting trail: exit once the position has given back this share of
+    # its PEAK GAIN. Exits at peak_gain x (1 - giveback), so it always banks a real gain
+    # (+12% peak -> +7.2% exit at 40%). Replaced the price-distance trail below, which
+    # measured the drop against the peak PRICE and therefore REQUIRED a +17.6% peak just
+    # to break even at its shipped 15% — live, positions peaked at +10-15%, so the only
+    # exits it could produce were losses (0 take-profits in ~30 round-trips). 0 = off.
+    trailing_giveback_pct: float = Field(
+        default=40.0, ge=0, le=100,
+        title="Trailing giveback %",
+        description="Sell once this % of the peak GAIN has been given back (0 = off).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 100, "step": 5, "unit": "%"}},
+    )
+    # Legacy price-distance trail: exit this percent below the post-entry HIGH PRICE.
+    # OFF by default — see trailing_giveback_pct for why it could only realize losses at
+    # the gains this book actually reaches. Still honored when set explicitly.
     trailing_stop_pct: float = Field(
-        default=15.0, ge=0,
+        default=0.0, ge=0,
         title="Trailing stop %",
         description="Sell this % below the post-entry high once armed (0 = off).",
         json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
                                     "min": 0, "max": 50, "step": 1, "unit": "%"}},
     )
-    # The trailing stop arms only once the high-water gain reaches this percent, so a
-    # fresh flat position can't be noise-stopped (downside stays with invalidation).
+    # Both trails arm only once the high-water gain reaches this percent, so a fresh flat
+    # position can't be noise-stopped (downside stays with invalidation). 8% catches the
+    # +10-15% moves this book actually produces — at the old 10% arm with a 40% giveback,
+    # nothing below a +10% peak was ever protected at all.
     trailing_arm_pct: float = Field(
-        default=10.0, ge=0,
+        default=8.0, ge=0,
         title="Trailing stop arms at %",
         description="Gain required before the trailing stop activates.",
         json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
                                     "min": 0, "max": 100, "step": 5, "unit": "%"}},
     )
+    # --- Volatility-scaled profit target ------------------------------------------
+    # A FLAT percent target ignores what a name can actually deliver: +20% is ~4 sigma of
+    # 30-day movement for a mega cap but ~1.4 sigma for a small cap, so the live book's
+    # median +20% target was unreachable (best peak since the mega-cap pivot: +2.5%).
+    # When enabled and a Monte-Carlo sim exists, the target becomes
+    # `target_vol_multiple x sigma_annual x sqrt(horizon_days/365)`, clamped to the band
+    # below, and the EARLIER of that and any explicit per-thesis target is used.
+    vol_scaled_target: bool = Field(
+        default=True,
+        title="Volatility-scaled target",
+        description="Size the profit target off the name's own volatility instead of a flat %.",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "toggle"}},
+    )
+    target_vol_multiple: float = Field(
+        default=1.5, ge=0,
+        title="Target sigma multiple",
+        description="Profit target in standard deviations of the hold-horizon move.",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0.5, "max": 4.0, "step": 0.25, "unit": "sigma"}},
+    )
+    # Horizon used to convert annualized vol into an expected move when a thesis carries
+    # no max_hold_days of its own.
+    target_horizon_days: float = Field(default=60.0, gt=0)
+    # Clamp band for the vol-scaled target, so a near-zero-vol sim can't scalp-exit a
+    # position and a meme-stock sigma can't set an unreachable one.
+    target_floor_pct: float = Field(default=8.0, ge=0)
+    target_ceiling_pct: float = Field(default=60.0, gt=0)
     # Time-boxed horizon exit, in days. 0 = off GLOBALLY by default: a horizon suits
     # event-driven confluence bets (whose promotion stamps 90d per thesis, the backtest-
     # validated default) but would churn a still-high-scoring discovery name straight
@@ -337,10 +380,59 @@ class ExitConfig(BaseModel):
             return {}
         return {
             "profit_target_pct": self.profit_target_pct,
+            "trailing_giveback_pct": self.trailing_giveback_pct,
             "trailing_stop_pct": self.trailing_stop_pct,
             "trailing_arm_pct": self.trailing_arm_pct,
             "max_hold_days": self.max_hold_days,
         }
+
+    def vol_target_pct(self, volatility: float | None, horizon_days: float | None) -> float | None:
+        """Pure: the volatility-scaled profit target in percent (None when unavailable).
+
+        ``target_vol_multiple`` sigmas of the expected move over the hold horizon,
+        annualized vol scaled by ``sqrt(days/365)``, clamped to the configured band.
+        """
+        if not self.vol_scaled_target or not volatility or volatility <= 0:
+            return None
+        days = horizon_days if horizon_days and horizon_days > 0 else self.target_horizon_days
+        sigma_h = float(volatility) * (days / 365.0) ** 0.5 * 100.0
+        target = self.target_vol_multiple * sigma_h
+        return max(self.target_floor_pct, min(self.target_ceiling_pct, target))
+
+
+class InvalidationConfig(BaseModel):
+    """Guards on the DOWNSIDE triggers (the loss-taking twin of ExitConfig).
+
+    Unlike take-profit thresholds, LLM-proposed invalidation thresholds were never
+    floor-clamped, so the model set 5% stops on 32 live theses and 3% on one. For an
+    equity that is ordinary two-week noise, which is why losses got realized
+    constantly while the (unreachable) profit targets never arrived. The floor is
+    applied at CHECK time as well as on ingest, so stops already persisted on live
+    theses are covered without a migration.
+    """
+
+    # A hard price stop tighter than this is treated as noise and raised to it.
+    # 0 disables the floor (raw LLM/thesis values are honored).
+    min_price_drop_pct: float = Field(
+        default=8.0, ge=0,
+        title="Minimum stop-loss %",
+        description="Hard price stops are never tighter than this (0 = no floor).",
+        json_schema_extra={"x_ui": {"group": "Exits", "control": "slider",
+                                    "min": 0, "max": 30, "step": 1, "unit": "%"}},
+    )
+
+    def floored(self, conditions: dict | None) -> dict:
+        """The conditions dict with ``price_drop_pct`` raised to the floor."""
+        cond = dict(conditions or {})
+        if self.min_price_drop_pct <= 0:
+            return cond
+        try:
+            pdp = float(cond["price_drop_pct"])
+        except (KeyError, TypeError, ValueError):
+            return cond
+        if 0 < pdp < self.min_price_drop_pct:
+            cond["price_drop_pct"] = self.min_price_drop_pct
+        return cond
 
 
 class AutonomyConfig(BaseModel):
@@ -495,6 +587,8 @@ class RoboConfig(BaseModel):
 
     # Deterministic take-profit exits (profit target / trailing stop / horizon).
     exits: ExitConfig = Field(default_factory=ExitConfig)
+    # Floors on the downside triggers (stops tighter than noise get raised).
+    invalidation: InvalidationConfig = Field(default_factory=InvalidationConfig)
 
     # Autonomous stock selection from the discovery funnel (Phase 4). Disabled by default.
     autonomy: AutonomyConfig = Field(default_factory=AutonomyConfig)
