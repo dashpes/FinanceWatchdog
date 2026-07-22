@@ -22,7 +22,19 @@ from investment_monitor.storage import (
     init_db,
 )
 
-TODAY = date(2026, 6, 18)
+# Anchored to the REAL clock, not a fixed date. The DB-backed gatherers window their
+# queries from `date.today()` (e.g. gather_volume_evidence -> get_prices(days=28)), so a
+# hardcoded TODAY silently ages out of that window and the fixtures stop being visible —
+# these tests began failing ~2026-07-18 for exactly that reason, with no code change.
+TODAY = date.today()
+
+
+def _dt(days_ago: int):
+    """A publish timestamp `days_ago` before TODAY (noon, so it never lands ahead of now)."""
+    from datetime import datetime
+
+    d = TODAY - timedelta(days=days_ago)
+    return datetime(d.year, d.month, d.day, 12, 0)
 
 
 def _ev(ticker, source, actor, days_ago=1, value=10000.0):
@@ -239,9 +251,9 @@ def test_news_evidence_requires_min_items(tmp_path):
     with get_session() as s:
         for i in range(3):
             s.add(NewsItem(ticker="NWS", headline=f"h{i}", source="x",
-                           url=f"http://n/{i}", published_at=datetime(2026, 6, 17, 12, 0)))
+                           url=f"http://n/{i}", published_at=_dt(1)))
         s.add(NewsItem(ticker="ONE", headline="h", source="x", url="http://one",
-                       published_at=datetime(2026, 6, 17, 12, 0)))
+                       published_at=_dt(1)))
     with get_session() as s:
         ev = gather_news_evidence(s, {"NWS", "ONE"}, TODAY, window_days=30, min_items=2)
     tickers = {e.ticker for e in ev}
@@ -261,7 +273,7 @@ def test_news_alone_cannot_qualify_a_finding(tmp_path):
     with get_session() as s:
         for i in range(3):
             s.add(NewsItem(ticker="NWQ", headline=f"h{i}", source="x",
-                           url=f"http://nq/{i}", published_at=datetime(2026, 6, 17, 12, 0)))
+                           url=f"http://nq/{i}", published_at=_dt(1)))
     with get_session() as s:
         findings = detect_confluence(s, ConfluenceConfig(), today=TODAY)
     assert [f for f in findings if f.ticker == "NWQ"] == []
@@ -279,9 +291,9 @@ def test_news_evidence_filters_by_published_not_ingestion(tmp_path):
     from investment_monitor.storage import NewsItem
 
     init_db(tmp_path / "n.db")
-    # window_days=30 -> with TODAY=2026-06-18 the cutoff is 2026-05-19.
-    stale = datetime(2026, 4, 1, 12, 0)   # ~11 weeks stale, but freshly re-ingested
-    fresh = datetime(2026, 6, 16, 12, 0)  # genuinely recent
+    # window_days=30 -> the cutoff is 30 days before TODAY.
+    stale = _dt(110)  # ~16 weeks stale, but freshly re-ingested
+    fresh = _dt(2)    # genuinely recent
     with get_session() as s:
         # STALE: 3 backfilled articles (created_at defaults to now) -> must be dropped.
         for i in range(3):
