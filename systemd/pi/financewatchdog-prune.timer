@@ -1,6 +1,6 @@
 [Unit]
 Description=FinanceWatchdog robo — weekly prune schedule (Sun 12:00, local time)
-Documentation=https://github.com/dashpes/FinanceWatchdog
+Documentation=https://github.com/dashpes/Archie
 
 [Timer]
 # Sunday noon: market closed and the overnight research loop is idle, so the shared

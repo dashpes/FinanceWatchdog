@@ -1,6 +1,6 @@
 [Unit]
 Description=FinanceWatchdog robo — daily summary schedule (13:15, Mon-Fri, local time)
-Documentation=https://github.com/dashpes/FinanceWatchdog
+Documentation=https://github.com/dashpes/Archie
 
 [Timer]
 # Local time (Pi TZ = America/Los_Angeles) — ~15m after the US close.

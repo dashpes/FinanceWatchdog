@@ -2,7 +2,7 @@
 # One-line installer for the FinanceWatchdog robo advisor on a headless Linux box
 # (built for Raspberry Pi OS / Debian on a Pi 5, works on any systemd + apt system).
 #
-#   curl -fsSL https://raw.githubusercontent.com/dashpes/FinanceWatchdog/main/scripts/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/dashpes/Archie/main/scripts/install.sh | sudo bash
 #
 # It is idempotent — re-running updates an existing install in place. It:
 #   1. apt-installs Python + git + a build-tool safety net (for ARM wheel gaps)
@@ -18,7 +18,7 @@
 #
 # Override any of these before running:
 #   FW_HOME=/opt/financewatchdog  FW_USER=financewatchdog  FW_TZ=America/Los_Angeles
-#   FW_REPO=https://github.com/dashpes/FinanceWatchdog.git  FW_REF=<tag/branch>  FW_SKIP_INIT=1
+#   FW_REPO=https://github.com/dashpes/Archie.git  FW_REF=<tag/branch>  FW_SKIP_INIT=1
 #   FW_NO_CLONE=1   # you already placed the code at FW_HOME (git clone or scp) — don't clone
 #   FW_MODELS=""    # skip model pulls (default: phi3:mini nomic-embed-text qwen2.5:14b, in bg)
 #
@@ -32,7 +32,7 @@ set -euo pipefail
 FW_HOME="${FW_HOME:-/opt/financewatchdog}"
 FW_USER="${FW_USER:-financewatchdog}"
 FW_TZ="${FW_TZ:-America/Los_Angeles}"
-FW_REPO="${FW_REPO:-https://github.com/dashpes/FinanceWatchdog.git}"
+FW_REPO="${FW_REPO:-https://github.com/dashpes/Archie.git}"
 FW_REF="${FW_REF:-}"   # blank => latest semver tag (falls back to default branch)
 FW_MODELS="${FW_MODELS-phi3:mini nomic-embed-text qwen2.5:14b}"   # FW_MODELS="" skips pulls
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=FinanceWatchdog dashboard — Archie's LAN web GUI (read + guarded controls)
-Documentation=https://github.com/dashpes/FinanceWatchdog
+Documentation=https://github.com/dashpes/Archie
 After=network-online.target
 Wants=network-online.target
 

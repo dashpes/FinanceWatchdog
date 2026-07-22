@@ -228,7 +228,7 @@ ARM64). One line provisions everything — a dedicated service user, venv + lock
 with RAM guardrails, the systemd bundle, and a credential wizard:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dashpes/FinanceWatchdog/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/dashpes/Archie/main/scripts/install.sh | sudo bash
 ```
 
 For a **private repo** (or to manage the code yourself), clone/scp it to `/opt/financewatchdog`

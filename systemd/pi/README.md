@@ -3,7 +3,7 @@
 The one-line installer sets all of this up for you:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dashpes/FinanceWatchdog/main/scripts/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/dashpes/Archie/main/scripts/install.sh | sudo bash
 ```
 
 It provisions a dedicated `financewatchdog` service user under `/opt/financewatchdog`,
@@ -18,7 +18,7 @@ If the repo is private (or you'd rather `git clone`/`scp` it over SSH), put it a
 `/opt/financewatchdog` first and tell the installer not to clone:
 
 ```bash
-sudo git clone git@github.com:dashpes/FinanceWatchdog.git /opt/financewatchdog   # or scp it there
+sudo git clone git@github.com:dashpes/Archie.git /opt/financewatchdog   # or scp it there
 sudo FW_NO_CLONE=1 FW_USER=$USER bash /opt/financewatchdog/scripts/install.sh
 ```
 

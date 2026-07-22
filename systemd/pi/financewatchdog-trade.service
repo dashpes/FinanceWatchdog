@@ -1,6 +1,6 @@
 [Unit]
 Description=FinanceWatchdog robo — trade run (thesis-run, gated by dry_run/kill-switch)
-Documentation=https://github.com/dashpes/FinanceWatchdog
+Documentation=https://github.com/dashpes/Archie
 After=network-online.target ollama.service
 Wants=network-online.target ollama.service
 

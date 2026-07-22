@@ -63,7 +63,7 @@ class UniverseCollector(BaseCollector):
         must identify the tool and a contact; we reuse sec_contact_email (blank -> generic).
         """
         contact = (self.config.sec_contact_email or "").strip() or "contact@financewatchdog.app"
-        return f"FinanceWatchdog/1.0 (https://github.com/dashpes/FinanceWatchdog; {contact})"
+        return f"FinanceWatchdog/1.0 (https://github.com/dashpes/Archie; {contact})"
 
     async def _fetch_url(self, url: str) -> str:
         """

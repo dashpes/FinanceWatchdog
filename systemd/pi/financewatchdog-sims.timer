@@ -1,6 +1,6 @@
 [Unit]
 Description=FinanceWatchdog robo — weekly sim refresh schedule (Sun 10:00, local time)
-Documentation=https://github.com/dashpes/FinanceWatchdog
+Documentation=https://github.com/dashpes/Archie
 
 [Timer]
 # Local time (Pi TZ = America/Los_Angeles). Sunday mid-morning: market closed, the
